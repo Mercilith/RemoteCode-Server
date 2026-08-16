@@ -1,4 +1,11 @@
+#include <iostream>
+
+#include "../src/greeting.h"
+
 int main() {
-    // Placeholder test — replace with real test cases as the project grows.
+    if (greeting() != "Hello, World!") {
+        std::cerr << "greeting() returned unexpected value: " << greeting() << std::endl;
+        return 1;
+    }
     return 0;
 }

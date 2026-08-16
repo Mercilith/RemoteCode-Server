@@ -1,6 +1,8 @@
 #include <iostream>
 
+#include "greeting.h"
+
 int main() {
-    std::cout << "RemoteCode Server starting..." << std::endl;
+    std::cout << greeting() << std::endl;
     return 0;
 }
