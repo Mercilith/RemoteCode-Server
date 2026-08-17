@@ -4,6 +4,7 @@
 
 #include <winhttp.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -24,32 +25,41 @@ public:
         const std::wstring& path,
         const std::wstring& subprotocol);
 
-    // Bounds how long ReceiveBinary() blocks with no data — lets the
-    // caller's loop wake periodically to check a stop flag, send keep-alive
-    // pings, and check for topic rotation, instead of blocking forever.
-    // A timed-out receive is reported as a normal false return from
-    // ReceiveBinary(), not a fatal error; callers distinguish via
-    // IsConnected() if they need to tell "timed out" from "peer closed".
+    // Attempts to bound how long ReceiveBinary() blocks with no data.
+    // NOTE: measured in practice that WINHTTP_OPTION_RECEIVE_TIMEOUT does
+    // NOT actually bound WinHttpWebSocketReceive on this platform/SDK
+    // (confirmed by a real ~48s wait despite a 5s timeout set) — kept
+    // as a best-effort no-op-if-ineffective setting, but callers that need
+    // a guaranteed-prompt unblock must use Close() from another thread
+    // instead (see below), not rely on this.
     void SetReceiveTimeoutMs(DWORD timeoutMs);
 
     bool SendBinary(const uint8_t* data, size_t len);
 
-    // Blocks (up to the receive timeout, if set) until one complete binary
-    // message has been received
-    // (transparently reassembling multi-fragment messages). Returns false
-    // on error or if the peer closed the connection.
+    // Blocks until one complete binary message has been received
+    // (transparently reassembling multi-fragment messages), the
+    // connection drops, or Close() is called from another thread.
+    // Returns false on error or if the peer closed the connection.
     bool ReceiveBinary(std::vector<uint8_t>& outData);
 
+    // Safe to call from a different thread than the one currently blocked
+    // inside ReceiveBinary() — this is the documented WinHTTP pattern for
+    // cancelling an in-flight synchronous call: closing the handle from
+    // another thread causes the blocked call to return an error promptly.
+    // MqttClient::ForceUnblock() relies on this.
     void Close();
 
     // False after Close(), or after ReceiveBinary()/SendBinary() hit a
     // real error (as opposed to a receive timeout, which leaves the
     // connection intact).
-    bool IsConnected() const { return websocket_ != nullptr && connected_; }
+    bool IsConnected() const { return websocket_ != nullptr && connected_.load(); }
 
 private:
     HINTERNET session_ = nullptr;
     HINTERNET connect_ = nullptr;
     HINTERNET websocket_ = nullptr;
-    bool connected_ = false;
+    // Atomic: read from ReceiveBinary()/IsConnected() on the main loop's
+    // thread, written from Close() which may run concurrently on the
+    // service control thread (see Close()'s doc above).
+    std::atomic<bool> connected_{false};
 };

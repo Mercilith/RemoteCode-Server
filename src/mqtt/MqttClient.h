@@ -26,24 +26,40 @@ public:
     bool Subscribe(const std::string& topic);
     bool Unsubscribe(const std::string& topic);
 
-    // Does one bounded-timeout receive/process cycle (see
-    // WebSocketTransport::SetReceiveTimeoutMs) and sends a PINGREQ if more
-    // than keepAliveSeconds/2 has elapsed since the last send. Invokes
+    // Does one receive/process cycle and sends a PINGREQ if more than
+    // keepAliveSeconds/2 has elapsed since the last send. Invokes
     // onMessage if a PUBLISH was received this cycle. Returns false once
-    // the connection has genuinely dropped (a receive timeout with no data
-    // is not a drop — it returns true so the caller keeps pumping). The
-    // service's main loop calls this in a tight loop so it can interleave
-    // its own per-iteration work (topic-rotation checks, shutdown-event
-    // polling) between cycles.
+    // the connection has genuinely dropped. The receive itself blocks
+    // until data arrives, the connection drops, or ForceUnblock() is
+    // called from another thread — there is no effective per-call
+    // timeout (WinHTTP's receive-timeout option does not bound
+    // WinHttpWebSocketReceive in practice, confirmed by measurement), so
+    // a caller that needs to interleave other per-iteration work (like
+    // ServiceMain's topic-rotation check) between cycles cannot rely on
+    // PumpOnce returning promptly on its own — see ForceUnblock().
     bool PumpOnce(const MessageCallback& onMessage);
 
     // Convenience wrapper: calls PumpOnce in a tight loop until Stop() is
     // called from another thread or the connection drops.
     void RunReceiveLoop(const MessageCallback& onMessage);
 
-    // Thread-safe; unblocks RunReceiveLoop/PumpOnce's caller loop the next
-    // time the bounded receive wakes.
+    // Thread-safe; sets a flag RunReceiveLoop checks between PumpOnce
+    // cycles. On its own this does NOT unblock an in-flight PumpOnce —
+    // WinHttpWebSocketReceive's timeout option turned out not to actually
+    // bound the call in practice (measured a real ~48s service stop before
+    // ForceUnblock() was added below), so callers that need a prompt stop
+    // while a receive may be in flight should call ForceUnblock() too.
     void Stop();
+
+    // Thread-safe; safe to call from a different thread than the one
+    // running PumpOnce/RunReceiveLoop (this is the whole point — it's how
+    // ServiceMain's SERVICE_CONTROL_STOP handler, running on the SCM's own
+    // control-dispatch thread, interrupts a blocked receive on the main
+    // loop's thread). Closes the underlying WebSocket handle, which causes
+    // a concurrently-blocked WinHttpWebSocketReceive call to return an
+    // error immediately — the standard WinHTTP pattern for cancelling an
+    // in-flight synchronous call from another thread.
+    void ForceUnblock();
 
     bool IsConnected() const { return transport_.IsConnected(); }
 

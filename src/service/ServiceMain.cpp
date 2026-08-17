@@ -4,6 +4,7 @@
 
 #include <shlobj.h>
 
+#include <atomic>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,17 @@ SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 SERVICE_STATUS g_status{};
 HANDLE g_shutdownEvent = nullptr;
 bool g_consoleMode = false;
+
+// Points at whichever MqttClient RunMainLoop currently has connected, so
+// ControlHandler (invoked on the SCM's own control-dispatch thread) can
+// unblock an in-flight PumpOnce()/ReceiveBinary() call immediately instead
+// of waiting for it to time out on its own — see MqttClient::ForceUnblock
+// for why that timeout can't be relied on. Set right after a successful
+// Connect(), cleared before the client goes out of scope; the brief window
+// where it might be stale (already cleared but ControlHandler reads the
+// old value) is harmless — ForceUnblock() on an already-closed transport
+// is a no-op.
+std::atomic<MqttClient*> g_activeClient{nullptr};
 
 std::wstring LogFilePath() {
     PWSTR programData = nullptr;
@@ -95,8 +107,11 @@ DWORD WINAPI ControlHandler(DWORD control, DWORD /*eventType*/, LPVOID /*eventDa
     switch (control) {
         case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
-            SetStatus(SERVICE_STOP_PENDING, 0, 3000);
+            SetStatus(SERVICE_STOP_PENDING, 0, 5000);
             SetEvent(g_shutdownEvent);
+            if (MqttClient* client = g_activeClient.load()) {
+                client->ForceUnblock();
+            }
             return NO_ERROR;
         case SERVICE_CONTROL_INTERROGATE:
             return NO_ERROR;
@@ -107,6 +122,9 @@ DWORD WINAPI ControlHandler(DWORD control, DWORD /*eventType*/, LPVOID /*eventDa
 
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
+        if (MqttClient* client = g_activeClient.load()) {
+            client->ForceUnblock();
+        }
         SetEvent(g_shutdownEvent);
         return TRUE;
     }
@@ -134,11 +152,13 @@ void RunMainLoop() {
             continue;
         }
         Log(L"Connected.");
+        g_activeClient.store(&client);
 
         int64_t currentEpoch = TopicDerivation::CurrentEpoch(time(nullptr));
         std::string currentTopic = TopicDerivation::DeriveTopicForEpoch(identity.publicKey, currentEpoch);
         if (!client.Subscribe(currentTopic)) {
             Log(L"Subscribe failed; reconnecting.");
+            g_activeClient.store(nullptr);
             client.Disconnect();
             WaitForSingleObject(g_shutdownEvent, 5000);
             continue;
@@ -170,6 +190,7 @@ void RunMainLoop() {
                 });
         }
 
+        g_activeClient.store(nullptr);
         client.Disconnect();
         if (!ShuttingDown()) {
             Log(L"Disconnected; reconnecting in 5s.");

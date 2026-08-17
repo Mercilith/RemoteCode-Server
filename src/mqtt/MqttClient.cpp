@@ -118,6 +118,10 @@ void MqttClient::Stop() {
     stopRequested_.store(true);
 }
 
+void MqttClient::ForceUnblock() {
+    transport_.Close();
+}
+
 void MqttClient::Disconnect() {
     if (transport_.IsConnected()) {
         const std::vector<uint8_t> packet = MqttPacket::EncodeDisconnect();
