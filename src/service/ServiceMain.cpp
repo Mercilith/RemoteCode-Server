@@ -40,7 +40,9 @@ std::wstring LogFilePath() {
         }
         return L"";
     }
-    std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\Server";
+    // Sibling of the install dir, not the exe's own directory — see
+    // identity/ServerIdentity.h for why (must match its ProgramDataDir()).
+    std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\ServerData";
     CoTaskMemFree(programData);
 
     std::error_code ec;

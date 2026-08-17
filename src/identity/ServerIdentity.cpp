@@ -34,7 +34,13 @@ std::wstring ProgramDataDir() {
         }
         return L"";
     }
-    std::wstring result = std::wstring(programData) + L"\\RemoteCode\\Server";
+    // A sibling of the install directory (%ProgramData%\RemoteCode\Server,
+    // where RemoteCodeServer.exe itself lives), not the same directory —
+    // RemoteCode-Installer's Uninstall flow can remove program files
+    // without necessarily removing this (or vice versa via its "also
+    // delete config files" option), so they must not collide. Keep in
+    // sync with RemoteCode-Installer's fs/InstallLocation.cpp ConfigDir().
+    std::wstring result = std::wstring(programData) + L"\\RemoteCode\\ServerData";
     CoTaskMemFree(programData);
     return result;
 }

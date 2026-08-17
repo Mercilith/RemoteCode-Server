@@ -15,13 +15,18 @@ struct ServerIdentity {
 };
 
 // Loads the identity from disk, or generates and persists a new one on
-// first run. Storage: %ProgramData%\RemoteCode\Server\identity.dat — a
-// machine-wide location, since this runs as a Windows Service (typically
-// under LocalSystem, which has no meaningful per-user profile) rather than
-// a per-user %APPDATA%/%LOCALAPPDATA% location. The secret key is
-// encrypted at rest with DPAPI machine-scope protection
-// (CRYPTPROTECT_LOCAL_MACHINE) before being written; the public key is
-// stored in plaintext alongside it.
+// first run. Storage: %ProgramData%\RemoteCode\ServerData\identity.dat —
+// machine-wide, since this runs as a Windows Service (typically under
+// LocalSystem, which has no meaningful per-user profile) rather than a
+// per-user %APPDATA%/%LOCALAPPDATA% location. "ServerData" is
+// deliberately a sibling of, not the same directory as, the install dir
+// (%ProgramData%\RemoteCode\Server, where the exe itself lives) — the
+// installer's Uninstall flow can remove program files without removing
+// this (or vice versa via its "also delete config files" option); see
+// RemoteCode-Installer's fs/InstallLocation.cpp ConfigDir(), which must
+// stay in sync with this path. The secret key is encrypted at rest with
+// DPAPI machine-scope protection (CRYPTPROTECT_LOCAL_MACHINE) before
+// being written; the public key is stored in plaintext alongside it.
 class ServerIdentityStore {
 public:
     // Returns false only on an unrecoverable I/O, RNG, or DPAPI failure.

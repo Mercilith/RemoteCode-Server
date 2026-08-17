@@ -5,7 +5,12 @@
 #include "MqttPacket.h"
 
 namespace {
-constexpr DWORD kReceiveTimeoutMs = 15000;
+// Bounds how long each receive blocks with no data, so the service's main
+// loop wakes often enough to notice a stop request promptly — the
+// installer's own service-stop wait (see RemoteCode-Installer's
+// PathAndStartupInstaller::WaitForServiceState) only waits 10s before
+// giving up, so this needs enough headroom under that for a clean stop.
+constexpr DWORD kReceiveTimeoutMs = 5000;
 }
 
 bool MqttClient::Connect(
