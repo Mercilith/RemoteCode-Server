@@ -1,0 +1,146 @@
+#include "AgentStore.h"
+
+#include <ctime>
+
+namespace {
+
+int64_t NowUnix() {
+    return static_cast<int64_t>(time(nullptr));
+}
+
+constexpr const char* kAlexId = "alex";
+constexpr const char* kAlexName = "Alex";
+constexpr const char* kAlexDescription =
+    "Helps set up and configure new agents — interviews you about what an agent should do, "
+    "drafts its config, and submits it for your approval.";
+constexpr const char* kAlexSystemPrompt =
+    "You are Alex. Your job is to help Cardon design and configure new agents for his "
+    "multi-agent system. You do not build or run agents yourself — you have a conversation "
+    "with Cardon to figure out what a new agent should be, then produce a structured draft "
+    "(name, one-line description, full system prompt, which tools it needs, which other "
+    "agents it should be allowed to message, and any starting facts it should know) and "
+    "submit that draft for approval. Ask clarifying questions until you have enough to write "
+    "a system prompt that would make the new agent's behavior unambiguous — vague specs "
+    "produce vague agents. Prefer specific, narrow agents with clear boundaries over broad "
+    "do-everything agents. Once Cardon approves a draft, it becomes a real agent; you can "
+    "also propose edits to existing agents the same way. Never mark an agent as active "
+    "yourself — every new agent goes through the approval workflow.";
+// Declarative for now — only post_message/read_chat are actually wired up
+// to the MCP server this pass; the rest becomes real once later passes
+// implement them (the MCP server simply won't expose a tool it hasn't
+// implemented yet, regardless of what's listed here).
+constexpr const char* kAlexToolPermissionsJson =
+    R"(["remember","start_chat","post_message","read_chat","list_agents","draft_agent","submit_agent_for_approval"])";
+constexpr const char* kAlexCanMessageJson = R"(["*"])";
+
+} // namespace
+
+bool AgentStore::IsEmpty() {
+    Statement stmt(db_, "SELECT COUNT(*) FROM agents;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    if (!stmt.Step()) {
+        return false;
+    }
+    return stmt.ColumnInt64(0) == 0;
+}
+
+bool AgentStore::SeedAlexIfEmpty() {
+    if (!IsEmpty()) {
+        return true;
+    }
+    Agent alex;
+    alex.id = kAlexId;
+    alex.name = kAlexName;
+    alex.description = kAlexDescription;
+    alex.systemPrompt = kAlexSystemPrompt;
+    alex.status = "active";
+    alex.toolPermissionsJson = kAlexToolPermissionsJson;
+    alex.canMessageJson = kAlexCanMessageJson;
+    alex.createdBy = "user";
+    alex.createdAt = NowUnix();
+    alex.updatedAt = alex.createdAt;
+    return Upsert(alex);
+}
+
+bool AgentStore::Get(const std::string& id, Agent& outAgent) {
+    Statement stmt(
+        db_,
+        "SELECT id, name, description, system_prompt, status, tool_permissions, can_message, "
+        "created_by, created_at, updated_at FROM agents WHERE id = ?1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, id);
+    if (!stmt.Step()) {
+        return false;
+    }
+    outAgent.id = stmt.ColumnText(0);
+    outAgent.name = stmt.ColumnText(1);
+    outAgent.description = stmt.ColumnText(2);
+    outAgent.systemPrompt = stmt.ColumnText(3);
+    outAgent.status = stmt.ColumnText(4);
+    outAgent.toolPermissionsJson = stmt.ColumnText(5);
+    outAgent.canMessageJson = stmt.ColumnText(6);
+    outAgent.createdBy = stmt.ColumnText(7);
+    outAgent.createdAt = stmt.ColumnInt64(8);
+    outAgent.updatedAt = stmt.ColumnInt64(9);
+    return true;
+}
+
+bool AgentStore::Upsert(const Agent& agent) {
+    Statement stmt(
+        db_,
+        "INSERT INTO agents (id, name, description, system_prompt, status, tool_permissions, "
+        "can_message, created_by, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, "
+        "system_prompt=excluded.system_prompt, status=excluded.status, "
+        "tool_permissions=excluded.tool_permissions, can_message=excluded.can_message, "
+        "updated_at=excluded.updated_at;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, agent.id);
+    stmt.BindText(2, agent.name);
+    stmt.BindText(3, agent.description);
+    stmt.BindText(4, agent.systemPrompt);
+    stmt.BindText(5, agent.status);
+    stmt.BindText(6, agent.toolPermissionsJson);
+    stmt.BindText(7, agent.canMessageJson);
+    stmt.BindText(8, agent.createdBy);
+    stmt.BindInt64(9, agent.createdAt);
+    stmt.BindInt64(10, agent.updatedAt);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool AgentStore::SetFact(const std::string& agentId, const std::string& key, const std::string& value) {
+    Statement stmt(
+        db_,
+        "INSERT INTO agent_facts (agent_id, key, value, updated_at) VALUES (?1,?2,?3,?4) "
+        "ON CONFLICT(agent_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, agentId);
+    stmt.BindText(2, key);
+    stmt.BindText(3, value);
+    stmt.BindInt64(4, NowUnix());
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool AgentStore::GetFact(const std::string& agentId, const std::string& key, std::string& outValue) {
+    Statement stmt(db_, "SELECT value FROM agent_facts WHERE agent_id = ?1 AND key = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, agentId);
+    stmt.BindText(2, key);
+    if (!stmt.Step()) {
+        return false;
+    }
+    outValue = stmt.ColumnText(0);
+    return true;
+}

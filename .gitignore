@@ -82,3 +82,6 @@ _deps/
 *.vcxproj
 *.vcxproj.filters
 *.vcxproj.user
+
+# Node
+node_modules/

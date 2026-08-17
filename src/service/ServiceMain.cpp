@@ -4,15 +4,12 @@
 
 #include <shlobj.h>
 
-#include <atomic>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 
-#include "../identity/ServerIdentity.h"
-#include "../mqtt/MqttClient.h"
-#include "../topic/TopicDerivation.h"
+#include "../orchestrator/Orchestrator.h"
 
 namespace fs = std::filesystem;
 
@@ -22,26 +19,10 @@ namespace {
 // (src/elevate/PathAndStartupInstaller.cpp in RemoteCode-Installer).
 constexpr wchar_t kServiceName[] = L"RemoteCodeServer";
 
-constexpr wchar_t kMqttHost[] = L"broker.hivemq.com";
-constexpr INTERNET_PORT kMqttPort = 8884; // HiveMQ's public broker, MQTT-over-WSS
-constexpr wchar_t kMqttWebSocketPath[] = L"/mqtt";
-constexpr char kMqttClientId[] = "remotecode-server";
-
 SERVICE_STATUS_HANDLE g_statusHandle = nullptr;
 SERVICE_STATUS g_status{};
 HANDLE g_shutdownEvent = nullptr;
 bool g_consoleMode = false;
-
-// Points at whichever MqttClient RunMainLoop currently has connected, so
-// ControlHandler (invoked on the SCM's own control-dispatch thread) can
-// unblock an in-flight PumpOnce()/ReceiveBinary() call immediately instead
-// of waiting for it to time out on its own — see MqttClient::ForceUnblock
-// for why that timeout can't be relied on. Set right after a successful
-// Connect(), cleared before the client goes out of scope; the brief window
-// where it might be stale (already cleared but ControlHandler reads the
-// old value) is harmless — ForceUnblock() on an already-closed transport
-// is a no-op.
-std::atomic<MqttClient*> g_activeClient{nullptr};
 
 std::wstring LogFilePath() {
     PWSTR programData = nullptr;
@@ -52,14 +33,37 @@ std::wstring LogFilePath() {
         }
         return L"";
     }
-    // Sibling of the install dir, not the exe's own directory — see
-    // identity/ServerIdentity.h for why (must match its ProgramDataDir()).
+    // Sibling of the install dir, not the exe's own directory.
     std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\ServerData";
     CoTaskMemFree(programData);
 
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir + L"\\service.log";
+}
+
+// The service (running as SYSTEM when installed via the SCM) and ad-hoc
+// console-mode debug runs (running as the logged-in user) share one log
+// file. Whichever identity creates it first can leave the other unable to
+// append to it (NTFS ACL inheritance doesn't grant both identities write
+// access to a file created by one of them). Resolved once per process:
+// probe the primary path, and if it can't be opened for append, fall back
+// to a sibling file this process can create fresh rather than losing all
+// log output silently.
+const std::wstring& ActiveLogPath() {
+    static const std::wstring path = [] {
+        const std::wstring primary = LogFilePath();
+        if (primary.empty()) {
+            return primary;
+        }
+        std::wofstream probe(primary.c_str(), std::ios::app);
+        if (probe.is_open()) {
+            return primary;
+        }
+        const size_t slash = primary.find_last_of(L"\\/");
+        return primary.substr(0, slash) + L"\\service-current.log";
+    }();
+    return path;
 }
 
 std::wstring TimestampNow() {
@@ -74,7 +78,7 @@ std::wstring TimestampNow() {
 void Log(const std::wstring& message) {
     const std::wstring line = TimestampNow() + L" " + message;
 
-    const std::wstring path = LogFilePath();
+    const std::wstring& path = ActiveLogPath();
     if (!path.empty()) {
         std::wofstream file(path.c_str(), std::ios::app);
         if (file.is_open()) {
@@ -82,14 +86,17 @@ void Log(const std::wstring& message) {
         }
     }
     if (g_consoleMode) {
-        std::wcout << line << std::endl;
+        // Narrow, ASCII-only write — log messages are always ASCII (see
+        // Orchestrator.cpp's AsciiToWide comment), and wcout on a redirected
+        // (non-console) stdout handle can wedge on certain wide characters,
+        // silently dropping all further output for the process's lifetime.
+        std::string narrow;
+        narrow.reserve(line.size());
+        for (const wchar_t c : line) {
+            narrow.push_back(static_cast<char>(c));
+        }
+        std::cout << narrow << std::endl;
     }
-}
-
-// Topics are lowercase hex (ASCII-only), so a plain widen is safe here —
-// no need for a full UTF-8 conversion for this specific string shape.
-std::wstring WidenHex(const std::string& hex) {
-    return std::wstring(hex.begin(), hex.end());
 }
 
 void SetStatus(DWORD state, DWORD exitCode = 0, DWORD waitHint = 0) {
@@ -109,9 +116,6 @@ DWORD WINAPI ControlHandler(DWORD control, DWORD /*eventType*/, LPVOID /*eventDa
         case SERVICE_CONTROL_SHUTDOWN:
             SetStatus(SERVICE_STOP_PENDING, 0, 5000);
             SetEvent(g_shutdownEvent);
-            if (MqttClient* client = g_activeClient.load()) {
-                client->ForceUnblock();
-            }
             return NO_ERROR;
         case SERVICE_CONTROL_INTERROGATE:
             return NO_ERROR;
@@ -122,82 +126,15 @@ DWORD WINAPI ControlHandler(DWORD control, DWORD /*eventType*/, LPVOID /*eventDa
 
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType) {
     if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT || ctrlType == CTRL_CLOSE_EVENT) {
-        if (MqttClient* client = g_activeClient.load()) {
-            client->ForceUnblock();
-        }
         SetEvent(g_shutdownEvent);
         return TRUE;
     }
     return FALSE;
 }
 
-bool ShuttingDown() {
-    return WaitForSingleObject(g_shutdownEvent, 0) == WAIT_OBJECT_0;
-}
-
 void RunMainLoop() {
-    ServerIdentity identity;
-    if (!ServerIdentityStore::LoadOrCreate(identity)) {
-        Log(L"Failed to load or create the server identity — cannot continue.");
-        return;
-    }
-    Log(L"Server identity ready.");
-
-    while (!ShuttingDown()) {
-        MqttClient client;
-        Log(L"Connecting to MQTT broker...");
-        if (!client.Connect(kMqttHost, kMqttPort, kMqttWebSocketPath, kMqttClientId)) {
-            Log(L"MQTT connect failed; retrying in 10s.");
-            WaitForSingleObject(g_shutdownEvent, 10000);
-            continue;
-        }
-        Log(L"Connected.");
-        g_activeClient.store(&client);
-
-        int64_t currentEpoch = TopicDerivation::CurrentEpoch(time(nullptr));
-        std::string currentTopic = TopicDerivation::DeriveTopicForEpoch(identity.publicKey, currentEpoch);
-        if (!client.Subscribe(currentTopic)) {
-            Log(L"Subscribe failed; reconnecting.");
-            g_activeClient.store(nullptr);
-            client.Disconnect();
-            WaitForSingleObject(g_shutdownEvent, 5000);
-            continue;
-        }
-        Log(L"Subscribed to topic " + WidenHex(currentTopic));
-
-        bool connectionOk = true;
-        while (connectionOk && !ShuttingDown()) {
-            const int64_t nowEpoch = TopicDerivation::CurrentEpoch(time(nullptr));
-            if (nowEpoch != currentEpoch) {
-                const std::string newTopic =
-                    TopicDerivation::DeriveTopicForEpoch(identity.publicKey, nowEpoch);
-                client.Unsubscribe(currentTopic);
-                if (client.Subscribe(newTopic)) {
-                    Log(L"Rotated to topic " + WidenHex(newTopic));
-                    currentEpoch = nowEpoch;
-                    currentTopic = newTopic;
-                } else {
-                    Log(L"Resubscribe after topic rotation failed; reconnecting.");
-                    connectionOk = false;
-                    break;
-                }
-            }
-
-            connectionOk = client.PumpOnce(
-                [](const std::string& topic, const std::vector<uint8_t>& payload) {
-                    Log(L"Message on " + WidenHex(topic) + L": " + std::to_wstring(payload.size()) +
-                        L" byte(s).");
-                });
-        }
-
-        g_activeClient.store(nullptr);
-        client.Disconnect();
-        if (!ShuttingDown()) {
-            Log(L"Disconnected; reconnecting in 5s.");
-            WaitForSingleObject(g_shutdownEvent, 5000);
-        }
-    }
-
+    Orchestrator orchestrator;
+    orchestrator.Run(g_shutdownEvent, Log);
     Log(L"Shutting down.");
 }
 
@@ -249,9 +186,9 @@ int ServiceMain::Run() {
     }
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
-    std::wcout << L"Not running under the Service Control Manager — running in console mode. "
-                  L"Press Ctrl+C to stop."
-               << std::endl;
+    std::cout << "Not running under the Service Control Manager - running in console mode. "
+                 "Press Ctrl+C to stop."
+              << std::endl;
     RunMainLoop();
 
     CloseHandle(g_shutdownEvent);

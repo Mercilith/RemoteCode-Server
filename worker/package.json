@@ -1,0 +1,18 @@
+{
+  "name": "remotecode-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Per-turn Agent SDK subprocess spawned by RemoteCodeServer's orchestrator.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.233"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "tsx": "^4.19.0"
+  }
+}

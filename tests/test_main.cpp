@@ -1,9 +1,15 @@
 #include <iostream>
 #include <string>
 
+#include "../src/db/AgentStore.h"
+#include "../src/db/ChatStore.h"
+#include "../src/db/Database.h"
+#include "../src/db/Schema.h"
 #include "../src/greeting.h"
-#include "mqtt/MqttPacket.h"
-#include "topic/TopicDerivation.h"
+#include "../src/mcp/McpServer.h"
+#include "../src/third_party/json.hpp"
+
+using nlohmann::json;
 
 namespace {
 
@@ -20,153 +26,191 @@ void TestGreeting() {
     Check(greeting() == "Hello, World!", "greeting() returns the expected string");
 }
 
-void TestTopicDerivation() {
-    uint8_t pubkey[32];
-    for (int i = 0; i < 32; ++i) {
-        pubkey[i] = static_cast<uint8_t>(i);
+void TestSchema() {
+    Database db;
+    Check(db.Open(L":memory:"), "Schema: in-memory database opens");
+    Check(Schema::EnsureCreated(db), "Schema: EnsureCreated succeeds");
+    // Calling it again against the same handle must stay a no-op, not error.
+    Check(Schema::EnsureCreated(db), "Schema: EnsureCreated is idempotent");
+
+    Statement stmt(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='agents';");
+    Check(stmt.Valid() && stmt.Step(), "Schema: agents table exists");
+}
+
+void TestAgentStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    AgentStore store(db);
+
+    Check(store.IsEmpty(), "AgentStore: starts empty");
+    Check(store.SeedAlexIfEmpty(), "AgentStore: seeds Alex");
+    Check(!store.IsEmpty(), "AgentStore: no longer empty after seeding");
+
+    Agent alex;
+    Check(store.Get("alex", alex), "AgentStore: Get('alex') found");
+    Check(alex.name == "Alex", "AgentStore: seeded Alex has expected name");
+    Check(!alex.systemPrompt.empty(), "AgentStore: seeded Alex has a system prompt");
+
+    // Seeding again once the table is non-empty must not duplicate/overwrite.
+    Check(store.SeedAlexIfEmpty(), "AgentStore: SeedAlexIfEmpty is a safe no-op when non-empty");
+
+    Agent custom;
+    custom.id = "test-agent";
+    custom.name = "Test Agent";
+    custom.description = "unit test fixture";
+    custom.systemPrompt = "You are a test.";
+    custom.status = "active";
+    custom.toolPermissionsJson = "[]";
+    custom.canMessageJson = "[]";
+    custom.createdBy = "user";
+    custom.createdAt = 1;
+    custom.updatedAt = 1;
+    Check(store.Upsert(custom), "AgentStore: Upsert inserts a new agent");
+
+    Agent roundTripped;
+    Check(store.Get("test-agent", roundTripped), "AgentStore: Get round-trips a custom agent");
+    Check(roundTripped.description == "unit test fixture", "AgentStore: round-tripped fields match");
+
+    Check(store.SetFact("test-agent", "favorite_color", "blue"), "AgentStore: SetFact succeeds");
+    std::string factValue;
+    Check(
+        store.GetFact("test-agent", "favorite_color", factValue) && factValue == "blue",
+        "AgentStore: GetFact round-trips");
+}
+
+void TestChatStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore store(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.title = "";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1234567890";
+    chat.createdAt = 1;
+    Check(store.CreateChat(chat), "ChatStore: CreateChat succeeds");
+
+    Chat fetched;
+    Check(store.GetChatByDiscordChannel("1234567890", fetched), "ChatStore: GetChatByDiscordChannel finds it");
+    Check(fetched.id == "chat-1", "ChatStore: fetched chat id matches");
+
+    Check(store.AddParticipant("chat-1", "agent", "alex"), "ChatStore: AddParticipant (agent) succeeds");
+    Check(store.AddParticipant("chat-1", "user", "user-1"), "ChatStore: AddParticipant (user) succeeds");
+    Check(store.IsParticipant("chat-1", "agent", "alex"), "ChatStore: IsParticipant true for participant");
+    Check(!store.IsParticipant("chat-1", "agent", "nobody"), "ChatStore: IsParticipant false for non-participant");
+
+    const std::vector<std::string> agentIds = store.ListParticipantAgentIds("chat-1");
+    Check(agentIds.size() == 1 && agentIds[0] == "alex", "ChatStore: ListParticipantAgentIds returns just alex");
+
+    for (int i = 0; i < 3; ++i) {
+        Message m;
+        m.chatId = "chat-1";
+        m.senderType = "user";
+        m.senderId = "user-1";
+        m.type = "text";
+        m.content = "message " + std::to_string(i);
+        m.createdAt = i;
+        Check(store.InsertMessage(m) >= 0, "ChatStore: InsertMessage succeeds for message " + std::to_string(i));
     }
 
-    // Reference values computed independently via Python's hashlib.blake2b
-    // (BLAKE2b(pubkey || epoch_as_8_byte_big_endian), digest_size=16).
+    const std::vector<Message> recent = store.RecentMessages("chat-1", 10);
+    Check(recent.size() == 3, "ChatStore: RecentMessages returns all 3 messages");
     Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 12345) == "2102dff634621c72e3929c96e12cee6e",
-        "Topic for epoch 12345 matches the independently-computed BLAKE2b reference value");
-    Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 0) == "1b6a0a281f1a641a32ff0953278d6b8c",
-        "Topic for epoch 0 matches the independently-computed BLAKE2b reference value");
-    Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 5000000000LL) ==
-            "1a5c619f3d8fb49b099b554b62b0dcae",
-        "Topic for a large epoch matches the independently-computed BLAKE2b reference value");
+        recent.size() == 3 && recent[0].content == "message 0" && recent[2].content == "message 2",
+        "ChatStore: RecentMessages is in chronological (oldest-first) order");
 
-    Check(TopicDerivation::CurrentEpoch(0) == 0, "Epoch 0 is unix time 0 (a UTC-midnight instant)");
-    Check(TopicDerivation::CurrentEpoch(299) == 0, "Epoch 0 covers unix time up to 299 inclusive");
-    Check(TopicDerivation::CurrentEpoch(300) == 1, "Epoch 1 begins exactly at unix time 300");
+    Check(store.SetWebhook("chat-1", "alex", "wh-id", "wh-token"), "ChatStore: SetWebhook succeeds");
+    std::string webhookId, webhookToken;
     Check(
-        TopicDerivation::CurrentEpoch(86400) == 288,
-        "24 hours in is epoch 288 (86400/300) — still aligned to UTC midnight");
-
-    Check(
-        TopicDerivation::SecondsUntilNextEpoch(0) == 300,
-        "300 seconds remain right at an epoch boundary");
-    Check(
-        TopicDerivation::SecondsUntilNextEpoch(299) == 1,
-        "1 second remains just before the next epoch boundary");
-
-    uint8_t otherPubkey[32] = {};
-    Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 100) !=
-            TopicDerivation::DeriveTopicForEpoch(otherPubkey, 100),
-        "Different public keys produce different topics for the same epoch");
-    Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 100) !=
-            TopicDerivation::DeriveTopicForEpoch(pubkey, 101),
-        "Different epochs produce different topics for the same public key");
-    Check(
-        TopicDerivation::DeriveTopicForEpoch(pubkey, 100).size() == 32,
-        "Topic is 32 hex characters (16 bytes)");
+        store.GetWebhook("chat-1", "alex", webhookId, webhookToken) && webhookId == "wh-id" &&
+            webhookToken == "wh-token",
+        "ChatStore: GetWebhook round-trips");
 }
 
-void TestMqttPacketConnect() {
-    const std::vector<uint8_t> packet = MqttPacket::EncodeConnect("client1", 60);
+void TestMcpServer() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
 
-    MqttPacket::FixedHeader header;
-    Check(MqttPacket::DecodeFixedHeader(packet, header), "CONNECT packet round-trips through DecodeFixedHeader");
-    Check(header.type == MqttPacket::Type::Connect, "Decoded fixed header reports type Connect");
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
 
-    // Fixed header byte: (CONNECT=1)<<4 | flags(0) = 0x10.
-    Check(packet[0] == 0x10, "CONNECT fixed header byte is 0x10");
-}
+    McpServer server(chatStore, "alex");
 
-void TestMqttPacketConnAck() {
-    // type=CONNACK(2), flags=0 -> 0x20; remaining length 2; session-present=0; return-code=0 (accepted).
-    const std::vector<uint8_t> raw = {0x20, 0x02, 0x00, 0x00};
-    MqttPacket::FixedHeader header;
-    Check(MqttPacket::DecodeFixedHeader(raw, header), "Hand-built CONNACK bytes decode via DecodeFixedHeader");
-    const MqttPacket::ConnAckResult result = MqttPacket::DecodeConnAck(header);
-    Check(result.success, "CONNACK with return code 0 is reported as success");
-
-    const std::vector<uint8_t> rejected = {0x20, 0x02, 0x00, 0x05};
-    MqttPacket::FixedHeader rejectedHeader;
-    MqttPacket::DecodeFixedHeader(rejected, rejectedHeader);
-    Check(!MqttPacket::DecodeConnAck(rejectedHeader).success, "CONNACK with a non-zero return code is reported as failure");
-}
-
-void TestMqttPacketSubscribeSubAck() {
-    const std::vector<uint8_t> subscribe = MqttPacket::EncodeSubscribe(42, "some/topic");
-    Check((subscribe[0] & 0x0F) == 0x02, "SUBSCRIBE fixed header flags are 0b0010 per the MQTT spec");
-
-    MqttPacket::FixedHeader header;
-    MqttPacket::DecodeFixedHeader(subscribe, header);
-    Check(header.type == MqttPacket::Type::Subscribe, "Encoded SUBSCRIBE decodes back to type Subscribe");
-
-    // SUBACK: type=9, flags=0 -> 0x90; remaining length 3; packet id 42 (0x002A); return code 0.
-    const std::vector<uint8_t> suback = {0x90, 0x03, 0x00, 0x2A, 0x00};
-    MqttPacket::FixedHeader subackHeader;
-    MqttPacket::DecodeFixedHeader(suback, subackHeader);
-    const MqttPacket::SubAckResult result = MqttPacket::DecodeSubAck(subackHeader);
-    Check(result.success, "SUBACK with return code 0 is reported as success");
-    Check(result.packetId == 42, "SUBACK packet id round-trips correctly");
-}
-
-void TestMqttPacketPublish() {
-    const std::vector<uint8_t> payload = {0xDE, 0xAD, 0xBE, 0xEF};
-    const std::vector<uint8_t> packet = MqttPacket::EncodePublish("a/b/c", payload);
-
-    MqttPacket::FixedHeader header;
-    Check(MqttPacket::DecodeFixedHeader(packet, header), "PUBLISH packet round-trips through DecodeFixedHeader");
-    const MqttPacket::PublishResult result = MqttPacket::DecodePublish(header);
-    Check(result.success, "PUBLISH decodes successfully");
-    Check(result.topic == "a/b/c", "PUBLISH topic round-trips correctly");
-    Check(result.payload == payload, "PUBLISH payload bytes round-trip exactly");
-}
-
-void TestMqttPacketRemainingLengthMultiByte() {
-    // A payload just over 127 bytes forces the remaining-length field to
-    // span two bytes (the MQTT variable-length-int continuation case).
-    const std::vector<uint8_t> payload(200, 0xAB);
-    const std::vector<uint8_t> packet = MqttPacket::EncodePublish("t", payload);
-
-    MqttPacket::FixedHeader header;
+    // Notification (no "id") must produce no response.
     Check(
-        MqttPacket::DecodeFixedHeader(packet, header),
-        "A packet with a multi-byte remaining-length field decodes correctly");
-    const MqttPacket::PublishResult result = MqttPacket::DecodePublish(header);
-    Check(result.payload.size() == 200, "Multi-byte remaining-length payload size round-trips correctly");
-}
+        server.HandleLine(R"({"jsonrpc":"2.0","method":"notifications/initialized"})").empty(),
+        "McpServer: notification produces no response");
 
-void TestMqttPacketPingAndDisconnect() {
-    const std::vector<uint8_t> ping = MqttPacket::EncodePingReq();
-    Check(ping == std::vector<uint8_t>({0xC0, 0x00}), "PINGREQ is exactly the two well-known bytes");
+    const json initResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":1,"method":"initialize"})"));
+    Check(initResponse["id"] == 1, "McpServer: initialize echoes request id");
+    Check(initResponse["result"].contains("protocolVersion"), "McpServer: initialize returns a protocolVersion");
 
-    MqttPacket::FixedHeader pingRespHeader;
-    MqttPacket::DecodeFixedHeader({0xD0, 0x00}, pingRespHeader);
-    Check(MqttPacket::IsPingResp(pingRespHeader), "0xD0 0x00 is recognized as PINGRESP");
+    const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
+    const json& tools = listResponse["result"]["tools"];
+    Check(tools.is_array() && tools.size() == 2, "McpServer: tools/list returns exactly 2 tools");
 
-    const std::vector<uint8_t> disconnect = MqttPacket::EncodeDisconnect();
-    Check(disconnect == std::vector<uint8_t>({0xE0, 0x00}), "DISCONNECT is exactly the two well-known bytes");
-}
+    const std::string postCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"chat_id", "chat-1"}, {"content", "hi there"}}}}},
+    }.dump();
+    const json postResponse = json::parse(server.HandleLine(postCall));
+    Check(postResponse["result"]["isError"] == false, "McpServer: post_message call succeeds");
 
-void TestMqttPacketMalformed() {
-    MqttPacket::FixedHeader header;
-    Check(!MqttPacket::DecodeFixedHeader({}, header), "An empty buffer is rejected");
+    const std::vector<Message> stored = chatStore.RecentMessages("chat-1", 10);
     Check(
-        !MqttPacket::DecodeFixedHeader({0x30, 0x05, 0x01}, header),
-        "A declared remaining-length longer than the actual buffer is rejected");
+        stored.size() == 1 && stored[0].content == "hi there" && stored[0].senderId == "alex",
+        "McpServer: post_message actually wrote the message as the scoped agent");
+
+    const std::string readCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 4},
+        {"method", "tools/call"},
+        {"params", {{"name", "read_chat"}, {"arguments", {{"chat_id", "chat-1"}}}}},
+    }.dump();
+    const json readResponse = json::parse(server.HandleLine(readCall));
+    const json readResult = json::parse(readResponse["result"]["content"][0]["text"].get<std::string>());
+    Check(
+        readResult["messages"].size() == 1 && readResult["messages"][0]["content"] == "hi there",
+        "McpServer: read_chat returns the message post_message wrote");
+
+    const std::string unknownToolCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 5},
+        {"method", "tools/call"},
+        {"params", {{"name", "not_a_real_tool"}, {"arguments", json::object()}}},
+    }.dump();
+    const json unknownToolResponse = json::parse(server.HandleLine(unknownToolCall));
+    Check(unknownToolResponse["result"]["isError"] == true, "McpServer: unknown tool name reports isError");
+
+    const json unknownMethodResponse =
+        json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":6,"method":"not/a_method"})"));
+    Check(unknownMethodResponse.contains("error"), "McpServer: unknown method returns a JSON-RPC error");
+
+    const json malformed = json::parse(server.HandleLine("not json at all"));
+    Check(malformed.contains("error") && malformed["error"]["code"] == -32700, "McpServer: malformed input is a parse error");
 }
 
 } // namespace
 
 int main() {
     TestGreeting();
-    TestTopicDerivation();
-    TestMqttPacketConnect();
-    TestMqttPacketConnAck();
-    TestMqttPacketSubscribeSubAck();
-    TestMqttPacketPublish();
-    TestMqttPacketRemainingLengthMultiByte();
-    TestMqttPacketPingAndDisconnect();
-    TestMqttPacketMalformed();
+    TestSchema();
+    TestAgentStore();
+    TestChatStore();
+    TestMcpServer();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;
