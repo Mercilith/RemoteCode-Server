@@ -1,8 +1,5 @@
-#include <iostream>
-
-#include "greeting.h"
+#include "service/ServiceMain.h"
 
 int main() {
-    std::cout << greeting() << std::endl;
-    return 0;
+    return ServiceMain::Run();
 }
