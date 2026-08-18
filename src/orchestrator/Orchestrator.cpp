@@ -94,6 +94,8 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
 
     const ServerConfig config = ServerConfigStore::Load();
     claudeConfigDir_ = config.claudeConfigDir;
+    discordGuildId_ = config.discordGuildId;
+    discordOwnerUserId_ = config.discordOwnerUserId;
 
     // Started regardless of Discord config validity — agent management
     // (list/create/edit, assigning a bot token) is useful even before
@@ -244,7 +246,11 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
 
         activityLog_->Log(chatId, agent.id, "turn_start");
 
-        const int64_t maxIdBeforeTurn = chatStore_->LatestMessageId(chatId);
+        // Global (not chat-scoped) watermark — a turn's messages aren't
+        // confined to the chat it ran in (message_user writes into the
+        // agent's own separate DM chat), so MessagesBySenderAfter below
+        // needs a watermark that covers every chat.
+        const int64_t maxIdBeforeTurn = chatStore_->LatestMessageId();
 
         std::string resumeSessionId;
         agentSessionStore_->Get(agent.id, chatId, resumeSessionId);
@@ -279,38 +285,53 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         reply.createdAt = static_cast<int64_t>(time(nullptr));
         chatStore_->InsertMessage(reply);
 
-        // Everything this turn produced — the primary reply just inserted
-        // above, plus any post_message calls the MCP subprocess made
-        // mid-turn (it only ever writes to the DB; it has no live Discord
-        // connection of its own) — gets mirrored to Discord and scanned for
-        // tags here, on the orchestrator's own thread, in one place.
-        for (const Message& produced : chatStore_->MessagesAfter(chatId, maxIdBeforeTurn)) {
+        // Everything this turn produced, in ANY chat — the primary reply
+        // just inserted above, plus any post_message calls the MCP
+        // subprocess made mid-turn (it only ever writes to the DB; it has
+        // no live Discord connection of its own), plus any message_user
+        // calls (which write into this agent's own separate DM chat) —
+        // gets mirrored to Discord and scanned for tags here, on the
+        // orchestrator's own thread, in one place.
+        for (const Message& produced : chatStore_->MessagesBySenderAfter(agent.id, maxIdBeforeTurn)) {
             // approval_request messages are posted separately by
             // PostPendingApprovals (with the approve/reject reactions
             // seeded on them) — mirroring them here first would leave them
             // with a discord_message_id already set and skip that step.
-            if (produced.type == "approval_request" || produced.senderType != "agent") {
+            if (produced.type == "approval_request") {
                 continue;
             }
 
-            Agent producer;
-            if (!agentStore_->Get(produced.senderId, producer)) {
+            Chat producedChat;
+            if (!chatStore_->GetChat(produced.chatId, producedChat)) {
                 continue;
             }
 
-            if (!chat.discordChannelId.empty() && produced.discordMessageId.empty()) {
+            // A DM chat is created without a Discord channel — create one
+            // now, the first time it actually has something to post.
+            std::string discordChannelId = producedChat.discordChannelId;
+            if (discordChannelId.empty() && produced.chatId.rfind("dm-", 0) == 0) {
+                discordChannelId = EnsureDmChannel(agent);
+            }
+
+            if (!discordChannelId.empty() && produced.discordMessageId.empty()) {
                 const std::string discordText = Mentions::ReflectMentionsForDiscord(produced.content, participants);
-                const std::string discordMessageId = PostAsAgent(producer, chat.discordChannelId, discordText);
+                const std::string discordMessageId = PostAsAgent(agent, discordChannelId, discordText);
                 if (!discordMessageId.empty()) {
                     chatStore_->SetMessageDiscordId(produced.id, discordMessageId);
                 }
+            }
+
+            // A DM chat has exactly one agent participant — nothing to
+            // address, so tag-driven dispatch never runs against it.
+            if (produced.chatId.rfind("dm-", 0) == 0) {
+                continue;
             }
 
             for (const std::string& targetId : Mentions::ParseMentions(produced.content, participants)) {
                 if (targetId == produced.senderId) {
                     continue; // no self-trigger
                 }
-                if (!Mentions::IsAllowedToMessage(producer, targetId)) {
+                if (!Mentions::IsAllowedToMessage(agent, targetId)) {
                     activityLog_->Log(chatId, produced.senderId, "mention_blocked", json{{"target", targetId}});
                     continue;
                 }
@@ -345,6 +366,32 @@ int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {
         }
     }
     return count;
+}
+
+std::string Orchestrator::EnsureDmChannel(const Agent& agent) {
+    const std::string dmChatId = "dm-" + agent.id;
+    Chat dmChat;
+    if (!chatStore_->GetChat(dmChatId, dmChat)) {
+        return ""; // message_user creates the chat row; nothing to do if it hasn't yet
+    }
+    if (!dmChat.discordChannelId.empty()) {
+        return dmChat.discordChannelId;
+    }
+    if (discordGuildId_.empty() || discordOwnerUserId_.empty()) {
+        log_(L"Orchestrator: agent '" + AsciiToWide(agent.id) + L"' tried to message you directly, but "
+             L"no discord_owner_user_id is configured (see config/ServerConfig.h) — dropping the "
+             L"message rather than posting it somewhere unintended.");
+        return "";
+    }
+
+    const std::string channelId = discordBot_->CreateDmChannel(
+        discordGuildId_, agent.id + "-dm", discordOwnerUserId_, agent.discordBotUserId);
+    if (channelId.empty()) {
+        log_(L"Orchestrator: failed to create a private DM channel for agent '" + AsciiToWide(agent.id) + L"'.");
+        return "";
+    }
+    chatStore_->SetChatDiscordChannel(dmChatId, channelId);
+    return channelId;
 }
 
 void Orchestrator::PostPendingApprovals() {

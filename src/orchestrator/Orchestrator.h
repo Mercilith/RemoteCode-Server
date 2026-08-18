@@ -62,10 +62,19 @@ private:
     // if the agent has no own bot configured or the token fails to decrypt.
     AgentBotClient* GetOrCreateAgentBotClient(const Agent& agent);
 
+    // Ensures `agent`'s private "dm-<id>" chat has a real Discord channel,
+    // creating one (and persisting it via ChatStore::SetChatDiscordChannel)
+    // if it doesn't yet. Returns the channel id, or an empty string if it
+    // can't be created (no discordOwnerUserId configured, no guild id, or
+    // the Discord API call failed).
+    std::string EnsureDmChannel(const Agent& agent);
+
     LogFn log_;
     std::wstring dbPath_;
     std::wstring logDir_;
     std::string claudeConfigDir_;
+    std::string discordGuildId_;
+    std::string discordOwnerUserId_;
     std::unique_ptr<Database> db_;
     std::unique_ptr<ChatStore> chatStore_;
     std::unique_ptr<AgentStore> agentStore_;

@@ -46,6 +46,50 @@ json PostMessage(ToolContext& ctx, const json& arguments, std::string& outError)
     return json{{"message_id", id}, {"status", "posted"}};
 }
 
+json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("content")) {
+        outError = "message_user requires 'content'";
+        return {};
+    }
+
+    // "dm-<agentId>" is deterministic on purpose — no lookup table needed,
+    // and it doubles as the signal Orchestrator uses to skip @mention
+    // dispatch for these messages (a DM chat only ever has one agent).
+    const std::string dmChatId = "dm-" + ctx.agentId;
+    Chat dmChat;
+    if (!ctx.chatStore.GetChat(dmChatId, dmChat)) {
+        dmChat.id = dmChatId;
+        dmChat.title = ctx.agentId + " (DM)";
+        dmChat.createdBy = ctx.agentId;
+        dmChat.status = "active";
+        // discordChannelId left empty on purpose — Orchestrator creates the
+        // real private Discord channel lazily the first time this chat has
+        // something to mirror (see Orchestrator::EnsureDmChannel), the same
+        // way every other Discord side-effect happens after a turn returns.
+        dmChat.createdAt = static_cast<int64_t>(time(nullptr));
+        if (!ctx.chatStore.CreateChat(dmChat)) {
+            outError = "failed to create the DM chat";
+            return {};
+        }
+        ctx.chatStore.AddParticipant(dmChatId, "agent", ctx.agentId);
+    }
+
+    Message message;
+    message.chatId = dmChatId;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "text";
+    message.content = arguments["content"].get<std::string>();
+    message.createdAt = static_cast<int64_t>(time(nullptr));
+
+    const int64_t id = ctx.chatStore.InsertMessage(message);
+    if (id < 0) {
+        outError = "failed to insert message";
+        return {};
+    }
+    return json{{"message_id", id}, {"status", "queued"}};
+}
+
 json ReadChat(ToolContext& ctx, const json& arguments, std::string& outError) {
     const std::string chatId = ResolveChatId(ctx, arguments);
     if (chatId.empty()) {
@@ -234,6 +278,20 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "message_user"},
+            {"description",
+             "Send Cardon something privately — a status update, an escalation, an answer meant just "
+             "for him — instead of posting it in whatever group chat this turn is running in. Always "
+             "goes to your own private DM channel with him, created automatically the first time you "
+             "use this. Use post_message for anything meant for the group instead."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"content", {{"type", "string"}}}}},
+                 {"required", json::array({"content"})},
+             }},
+        },
+        {
             {"name", "submit_agent_for_approval"},
             {"description",
              "Propose a new agent for Cardon to approve. Posts the draft into the current chat with "
@@ -286,6 +344,8 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = PostMessage(ctx, arguments, outError);
     } else if (toolName == "read_chat") {
         result = ReadChat(ctx, arguments, outError);
+    } else if (toolName == "message_user") {
+        result = MessageUser(ctx, arguments, outError);
     } else if (toolName == "submit_agent_for_approval") {
         result = SubmitAgentForApproval(ctx, arguments, outError);
     } else if (toolName == "update_agent") {

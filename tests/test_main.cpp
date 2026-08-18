@@ -232,6 +232,35 @@ void TestChatStore() {
         store.MessagesAfter("chat-1", insertedIds.back()).empty(),
         "ChatStore: MessagesAfter is empty once the watermark is the latest id");
 
+    Check(store.CreateChat(Chat{"chat-2", "", "user", "active", "", 1}), "ChatStore: CreateChat for a second chat");
+    Message crossChatMessage;
+    crossChatMessage.chatId = "chat-2";
+    crossChatMessage.senderType = "agent";
+    crossChatMessage.senderId = "alex";
+    crossChatMessage.type = "text";
+    crossChatMessage.content = "from chat-2";
+    crossChatMessage.createdAt = 10;
+    Check(store.InsertMessage(crossChatMessage) >= 0, "ChatStore: InsertMessage into chat-2 succeeds");
+
+    Check(
+        store.LatestMessageId() >= insertedIds.back(),
+        "ChatStore: the no-arg LatestMessageId() is a global (cross-chat) watermark");
+
+    const std::vector<Message> bySender = store.MessagesBySenderAfter("alex", 0);
+    Check(
+        bySender.size() == 1 && bySender[0].chatId == "chat-2" && bySender[0].content == "from chat-2",
+        "ChatStore: MessagesBySenderAfter finds a message in a different chat than the watermark's origin");
+    Check(
+        store.MessagesBySenderAfter("nobody", 0).empty(),
+        "ChatStore: MessagesBySenderAfter only returns that sender's messages");
+
+    Check(
+        store.SetChatDiscordChannel("chat-2", "9999"), "ChatStore: SetChatDiscordChannel succeeds");
+    Chat updatedChat2;
+    Check(
+        store.GetChat("chat-2", updatedChat2) && updatedChat2.discordChannelId == "9999",
+        "ChatStore: SetChatDiscordChannel persists the new channel id");
+
     Check(store.SetWebhook("chat-1", "alex", "wh-id", "wh-token"), "ChatStore: SetWebhook succeeds");
     std::string webhookId, webhookToken;
     Check(
@@ -270,7 +299,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 4, "McpServer: tools/list returns exactly 4 tools");
+    Check(tools.is_array() && tools.size() == 5, "McpServer: tools/list returns exactly 5 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -378,6 +407,56 @@ void TestApprovalWorkflowTool() {
     Check(
         duplicateResponse["result"]["isError"] == true,
         "submit_agent_for_approval rejects a duplicate agent id");
+}
+
+void TestMessageUserTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    ActivityLog activityLog(L"test-logs", "test-message-user");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+
+    const std::string messageUserCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "message_user"}, {"arguments", {{"content", "private note"}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(messageUserCall));
+    Check(response["result"]["isError"] == false, "message_user call succeeds");
+
+    Chat dmChat;
+    Check(chatStore.GetChat("dm-alex", dmChat), "message_user creates a dm-<agentId> chat");
+    Check(
+        dmChat.discordChannelId.empty(),
+        "message_user leaves discordChannelId empty — Orchestrator creates it lazily");
+
+    const std::vector<Message> dmMessages = chatStore.RecentMessages("dm-alex", 10);
+    Check(
+        dmMessages.size() == 1 && dmMessages[0].content == "private note" && dmMessages[0].senderId == "alex",
+        "message_user writes into the dm chat, not the current group chat");
+    Check(
+        chatStore.RecentMessages("chat-1", 10).empty(),
+        "message_user does not write anything into the current (group) chat");
+
+    // A second call must reuse the same dm chat, not fail or duplicate it.
+    const json secondResponse = json::parse(server.HandleLine(messageUserCall));
+    Check(secondResponse["result"]["isError"] == false, "a second message_user call also succeeds");
+    Check(
+        chatStore.RecentMessages("dm-alex", 10).size() == 2,
+        "a second message_user call reuses the existing dm chat (get-or-create is idempotent)");
 }
 
 void TestUpdateAgentTool() {
@@ -506,6 +585,7 @@ int main() {
     TestChatStore();
     TestMcpServer();
     TestApprovalWorkflowTool();
+    TestMessageUserTool();
     TestUpdateAgentTool();
     TestMentions();
 

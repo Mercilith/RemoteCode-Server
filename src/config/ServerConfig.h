@@ -5,6 +5,11 @@
 struct ServerConfig {
     std::string discordBotToken; // plaintext once loaded into memory
     std::string discordGuildId;
+    // Cardon's Discord user id — the only human ever granted access to a
+    // per-agent private DM channel (see Orchestrator::EnsureDmChannel).
+    // No auto-detection exists for "who is Cardon" and doesn't need to on
+    // a personal single-user system; set by hand like discordGuildId.
+    std::string discordOwnerUserId;
     // Optional. Points the per-turn worker subprocess's CLAUDE_CONFIG_DIR
     // at an already-`claude /login`'d user's config directory (normally
     // %USERPROFILE%\.claude) — needed because the Windows Service runs as
@@ -30,8 +35,11 @@ struct ServerConfig {
 // hand-write this file with your token + guild id the first time — there's
 // no setup UI yet. Format for a fresh file:
 //   { "discord_bot_token": "...", "discord_guild_id": "...",
+//     "discord_owner_user_id": "...",
 //     "claude_config_dir": "C:\\Users\\you\\.claude" }
-// claude_config_dir is optional — see ServerConfig::claudeConfigDir.
+// claude_config_dir and discord_owner_user_id are optional — see
+// ServerConfig::claudeConfigDir/discordOwnerUserId (per-agent DM channels
+// are simply never created without the latter set).
 // On first load, the plaintext token is immediately replaced on disk with
 // a DPAPI machine-scope-encrypted form (field renamed to
 // "discord_bot_token_encrypted") — same CryptProtectData pattern the

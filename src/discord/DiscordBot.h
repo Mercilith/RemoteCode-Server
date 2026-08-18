@@ -70,6 +70,22 @@ public:
     // messages.
     bool AddReaction(const std::string& channelId, const std::string& messageId, const std::string& emoji);
 
+    // This bot's own Discord user id (populated from dpp::cluster::me once
+    // connected) — empty before the gateway is ready. Needed so a created
+    // DM channel can grant the shared bot itself view/send access alongside
+    // whichever human/agent-bot it's actually for.
+    std::string BotUserId() const;
+
+    // Creates a private text channel in `guildId` named `channelName`,
+    // denies @everyone view, and grants view/send/read-history to
+    // `humanUserId` and this bot's own account, plus `extraBotUserId` too
+    // if non-empty (an agent's own bot, when it has one — it may end up
+    // posting there instead of this shared bot). Returns the new channel's
+    // id, or an empty string on failure.
+    std::string CreateDmChannel(
+        const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
+        const std::string& extraBotUserId);
+
     // True if shard 0 hasn't received a heartbeat ACK from Discord in an
     // unreasonably long time — the local socket can look connected (and
     // keep sending outbound heartbeats on its own timer) while the remote

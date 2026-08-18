@@ -34,6 +34,10 @@ public:
     bool CreateChat(const Chat& chat);
     bool GetChatByDiscordChannel(const std::string& discordChannelId, Chat& outChat);
     bool GetChat(const std::string& chatId, Chat& outChat);
+    // Persists a Discord channel id onto a chat that was created without
+    // one yet — used once a lazily-created DM channel (see
+    // Orchestrator::EnsureDmChannel) actually exists.
+    bool SetChatDiscordChannel(const std::string& chatId, const std::string& discordChannelId);
 
     bool AddParticipant(
         const std::string& chatId, const std::string& participantType, const std::string& participantId);
@@ -57,10 +61,20 @@ public:
     // tool calls) without needing a live channel back from the MCP
     // subprocess that wrote them.
     std::vector<Message> MessagesAfter(const std::string& chatId, int64_t afterId);
+    // Messages authored by `senderId` (any chat) with id > afterId,
+    // chronological order — like MessagesAfter but scoped by sender
+    // instead of chat, so it also catches a turn's post_message calls
+    // targeting an explicit different chat_id, and message_user calls
+    // (which always write into the agent's own separate DM chat).
+    std::vector<Message> MessagesBySenderAfter(const std::string& senderId, int64_t afterId);
     // Highest message id in the chat, or 0 if it has none yet — the
     // "before" watermark passed to MessagesAfter to find everything a turn
     // produced.
     int64_t LatestMessageId(const std::string& chatId);
+    // Highest message id across every chat — the global watermark for
+    // MessagesBySenderAfter, since a turn's tool calls aren't confined to
+    // one chat.
+    int64_t LatestMessageId();
 
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,

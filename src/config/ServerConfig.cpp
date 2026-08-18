@@ -64,6 +64,7 @@ ServerConfig ServerConfigStore::Load() {
     }
 
     config.discordGuildId = parsed.value("discord_guild_id", "");
+    config.discordOwnerUserId = parsed.value("discord_owner_user_id", "");
     config.claudeConfigDir = parsed.value("claude_config_dir", "");
 
     bool resealNeeded = false;
@@ -101,6 +102,7 @@ bool ServerConfigStore::Save(const ServerConfig& config) {
 
     json out;
     out["discord_guild_id"] = config.discordGuildId;
+    out["discord_owner_user_id"] = config.discordOwnerUserId;
     out["claude_config_dir"] = config.claudeConfigDir;
 
     if (!config.discordBotToken.empty()) {

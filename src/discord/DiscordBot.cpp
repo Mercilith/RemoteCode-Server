@@ -191,6 +191,53 @@ bool DiscordBot::AddReaction(
     return !result.is_error();
 }
 
+std::string DiscordBot::BotUserId() const {
+    std::lock_guard<std::mutex> lock(botMutex_);
+    if (!bot_ || bot_->me.id == 0) {
+        return "";
+    }
+    return std::to_string(bot_->me.id);
+}
+
+std::string DiscordBot::CreateDmChannel(
+    const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
+    const std::string& extraBotUserId) {
+    if (!bot_ || guildId.empty() || humanUserId.empty()) {
+        return "";
+    }
+
+    dpp::channel c;
+    c.set_name(channelName);
+    c.set_type(dpp::CHANNEL_TEXT);
+    c.set_guild_id(std::stoull(guildId));
+
+    constexpr uint64_t kView = dpp::p_view_channel;
+    constexpr uint64_t kUse = dpp::p_view_channel | dpp::p_send_messages | dpp::p_read_message_history;
+
+    // Deny the @everyone role (its id is always the guild's own id) view
+    // access, then explicitly allow the specific accounts that should see
+    // this channel — that combination is what makes it "private."
+    c.add_permission_overwrite(std::stoull(guildId), dpp::ot_role, 0, kView);
+    c.add_permission_overwrite(std::stoull(humanUserId), dpp::ot_member, kUse, 0);
+    const std::string ownBotUserId = BotUserId();
+    if (!ownBotUserId.empty()) {
+        c.add_permission_overwrite(std::stoull(ownBotUserId), dpp::ot_member, kUse, 0);
+    }
+    if (!extraBotUserId.empty()) {
+        c.add_permission_overwrite(std::stoull(extraBotUserId), dpp::ot_member, kUse, 0);
+    }
+
+    std::promise<dpp::confirmation_callback_t> promise;
+    std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    bot_->channel_create(c, [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+    const dpp::confirmation_callback_t result = future.get();
+    if (result.is_error()) {
+        return "";
+    }
+    const dpp::channel created = std::get<dpp::channel>(result.value);
+    return std::to_string(created.id);
+}
+
 bool DiscordBot::IsZombied() const {
     std::lock_guard<std::mutex> lock(botMutex_);
     if (!bot_) {

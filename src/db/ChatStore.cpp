@@ -79,6 +79,17 @@ bool ChatStore::GetChat(const std::string& chatId, Chat& outChat) {
     return true;
 }
 
+bool ChatStore::SetChatDiscordChannel(const std::string& chatId, const std::string& discordChannelId) {
+    Statement stmt(db_, "UPDATE chats SET discord_channel_id = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, discordChannelId);
+    stmt.BindText(2, chatId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
 bool ChatStore::AddParticipant(
     const std::string& chatId, const std::string& participantType, const std::string& participantId) {
     Statement stmt(
@@ -275,6 +286,33 @@ int64_t ChatStore::LatestMessageId(const std::string& chatId) {
         return 0;
     }
     return stmt.ColumnInt64(0);
+}
+
+int64_t ChatStore::LatestMessageId() {
+    Statement stmt(db_, "SELECT COALESCE(MAX(id), 0) FROM messages;");
+    if (!stmt.Valid() || !stmt.Step()) {
+        return 0;
+    }
+    return stmt.ColumnInt64(0);
+}
+
+std::vector<Message> ChatStore::MessagesBySenderAfter(const std::string& senderId, int64_t afterId) {
+    std::vector<Message> messages;
+    Statement stmt(
+        db_,
+        "SELECT id, chat_id, sender_type, sender_id, type, content, metadata, discord_message_id, "
+        "created_at FROM messages WHERE sender_id = ?1 AND id > ?2 ORDER BY id ASC;");
+    if (!stmt.Valid()) {
+        return messages;
+    }
+    stmt.BindText(1, senderId);
+    stmt.BindInt64(2, afterId);
+    while (stmt.Step()) {
+        Message m;
+        ReadMessageRow(stmt, m);
+        messages.push_back(std::move(m));
+    }
+    return messages;
 }
 
 bool ChatStore::GetWebhook(
