@@ -5,8 +5,8 @@
 #include <ctime>
 #include <future>
 
-DiscordBot::DiscordBot(std::string token, ChatStore& chatStore)
-    : token_(std::move(token)), chatStore_(chatStore) {}
+DiscordBot::DiscordBot(std::string token, ChatStore& chatStore, AgentStore& agentStore)
+    : token_(std::move(token)), chatStore_(chatStore), agentStore_(agentStore) {}
 
 DiscordBot::~DiscordBot() = default;
 
@@ -69,10 +69,17 @@ void DiscordBot::HandleMessageCreate(const dpp::message_create_t& event) {
         if (!chatStore_.CreateChat(chat)) {
             return;
         }
-        // Alex is the only agent that exists this pass — auto-join every
-        // channel-backed chat so "message in a channel Alex is in" holds
-        // trivially, without needing real invite/addressing logic yet.
-        chatStore_.AddParticipant(chat.id, "agent", "alex");
+    }
+
+    // No explicit invite/addressing mechanism exists yet, so "every active
+    // agent is a member of every channel-backed chat" is the whole
+    // membership rule for now — checked (cheaply; AddParticipant is
+    // INSERT OR IGNORE) on every incoming message, not just chat creation,
+    // so an agent activated after a chat already existed still joins it.
+    for (const Agent& agent : agentStore_.ListAll()) {
+        if (agent.status == "active") {
+            chatStore_.AddParticipant(chat.id, "agent", agent.id);
+        }
     }
 
     const std::string userId = std::to_string(event.msg.author.id);

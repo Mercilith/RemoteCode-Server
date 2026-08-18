@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 
+#include "../db/AgentStore.h"
 #include "../db/ChatStore.h"
 
 namespace dpp {
@@ -29,7 +30,11 @@ using DiscordReactionHandler =
 // under its own name/avatar in a channel.
 class DiscordBot {
 public:
-    DiscordBot(std::string token, ChatStore& chatStore);
+    // `agentStore` is used to auto-join every *active* agent into any
+    // channel-backed chat it sees a message in (see HandleMessageCreate) —
+    // there's no explicit invite/addressing mechanism yet, so "active agent"
+    // is the whole membership rule for now.
+    DiscordBot(std::string token, ChatStore& chatStore, AgentStore& agentStore);
     ~DiscordBot();
 
     DiscordBot(const DiscordBot&) = delete;
@@ -82,6 +87,7 @@ private:
 
     std::string token_;
     ChatStore& chatStore_;
+    AgentStore& agentStore_;
     IncomingMessageHandler onIncomingMessage_;
     DiscordLogHandler onLog_;
     DiscordReactionHandler onReaction_;

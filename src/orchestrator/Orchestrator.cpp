@@ -112,7 +112,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         return;
     }
 
-    discordBot_ = std::make_unique<DiscordBot>(config.discordBotToken, *chatStore_);
+    discordBot_ = std::make_unique<DiscordBot>(config.discordBotToken, *chatStore_, *agentStore_);
     discordBot_->SetLogHandler([this](const std::string& message) { log_(L"Discord: " + AsciiToWide(message)); });
     discordBot_->SetIncomingMessageHandler([this](const std::string& chatId) {
         // Runs on DPP's gateway thread — hop to a detached worker thread so
