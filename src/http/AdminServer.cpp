@@ -62,13 +62,16 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json& outBod
 } // namespace
 
 AdminServer::AdminServer(
-    AgentStore& agentStore, AgentSessionStore& agentSessionStore, std::wstring dbPath,
-    std::string claudeConfigDir, std::wstring logDir)
+    AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
+    std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
+    InjectMessageFn injectMessage)
     : agentStore_(agentStore),
       agentSessionStore_(agentSessionStore),
+      chatStore_(chatStore),
       dbPath_(std::move(dbPath)),
       claudeConfigDir_(std::move(claudeConfigDir)),
-      logDir_(std::move(logDir)) {}
+      logDir_(std::move(logDir)),
+      injectMessage_(std::move(injectMessage)) {}
 
 AdminServer::~AdminServer() = default;
 
@@ -283,6 +286,56 @@ void AdminServer::Run(int port) {
         Agent updated = target;
         agentStore_.Get(target.id, updated); // pick up whatever update_agent changed, if anything
         SendJson(res, json{{"reply", result.response}, {"agent", AgentToJson(updated, true)}});
+    });
+
+    // --- DEBUG/DEV-ONLY endpoints -------------------------------------
+    // Exercise the message-dispatch pipeline (incoming message -> agent
+    // turns -> tagging -> replies) without touching real Discord. Same
+    // trust boundary as the rest of this API (loopback-only, no auth) —
+    // see the class comment in AdminServer.h.
+
+    server_->Get("/debug/chats", [this](const httplib::Request&, httplib::Response& res) {
+        json out = json::array();
+        for (const Chat& chat : chatStore_.ListChats()) {
+            out.push_back(json{
+                {"id", chat.id},
+                {"title", chat.title},
+                {"status", chat.status},
+                {"discord_channel_id", chat.discordChannelId},
+                {"created_by", chat.createdBy},
+                {"participant_agent_ids", chatStore_.ListParticipantAgentIds(chat.id)},
+            });
+        }
+        SendJson(res, out);
+    });
+
+    server_->Post("/debug/inject-message", [this](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        if (!ParseBody(req, res, body)) {
+            return;
+        }
+        if (!body.contains("chat_id") || body["chat_id"].get<std::string>().empty()) {
+            SendError(res, 400, "'chat_id' is required");
+            return;
+        }
+        if (!body.contains("content") || body["content"].get<std::string>().empty()) {
+            SendError(res, 400, "'content' is required");
+            return;
+        }
+        const std::string chatId = body["chat_id"].get<std::string>();
+        const std::string content = body["content"].get<std::string>();
+        const std::string senderId = body.value("sender_id", std::string());
+
+        if (!injectMessage_) {
+            SendError(res, 500, "debug message injection is not wired up");
+            return;
+        }
+        const json result = injectMessage_(chatId, content, senderId);
+        if (result.contains("error")) {
+            SendError(res, 400, result["error"].get<std::string>());
+            return;
+        }
+        SendJson(res, result);
     });
 
     server_->listen("127.0.0.1", port);

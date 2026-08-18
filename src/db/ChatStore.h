@@ -34,6 +34,10 @@ public:
     bool CreateChat(const Chat& chat);
     bool GetChatByDiscordChannel(const std::string& discordChannelId, Chat& outChat);
     bool GetChat(const std::string& chatId, Chat& outChat);
+    // Every chat, most recently created first — used by the debug
+    // `/debug/chats` admin endpoint so a caller can pick a chat_id without
+    // querying SQLite directly.
+    std::vector<Chat> ListChats();
     // Persists a Discord channel id onto a chat that was created without
     // one yet — used once a lazily-created DM channel (see
     // Orchestrator::EnsureDmChannel) actually exists.

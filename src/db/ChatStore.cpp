@@ -79,6 +79,28 @@ bool ChatStore::GetChat(const std::string& chatId, Chat& outChat) {
     return true;
 }
 
+std::vector<Chat> ChatStore::ListChats() {
+    std::vector<Chat> chats;
+    Statement stmt(
+        db_,
+        "SELECT id, title, created_by, status, discord_channel_id, created_at FROM chats "
+        "ORDER BY created_at DESC;");
+    if (!stmt.Valid()) {
+        return chats;
+    }
+    while (stmt.Step()) {
+        Chat c;
+        c.id = stmt.ColumnText(0);
+        c.title = OrEmpty(stmt, 1);
+        c.createdBy = stmt.ColumnText(2);
+        c.status = stmt.ColumnText(3);
+        c.discordChannelId = OrEmpty(stmt, 4);
+        c.createdAt = stmt.ColumnInt64(5);
+        chats.push_back(std::move(c));
+    }
+    return chats;
+}
+
 bool ChatStore::SetChatDiscordChannel(const std::string& chatId, const std::string& discordChannelId) {
     Statement stmt(db_, "UPDATE chats SET discord_channel_id = ?1 WHERE id = ?2;");
     if (!stmt.Valid()) {
