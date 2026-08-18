@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <windows.h>
 
+#include "../db/AgentSessionStore.h"
 #include "../db/AgentStore.h"
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
@@ -57,6 +58,7 @@ private:
     std::unique_ptr<ChatStore> chatStore_;
     std::unique_ptr<AgentStore> agentStore_;
     std::unique_ptr<ApprovalStore> approvalStore_;
+    std::unique_ptr<AgentSessionStore> agentSessionStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;
 

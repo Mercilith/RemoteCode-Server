@@ -8,8 +8,8 @@ interface TurnMessage {
 
 interface TurnRequest {
   systemPrompt: string;
-  // Recent chat history, oldest first — this pass replays it in full each
-  // turn instead of resuming an SDK session (see plan: Section 5 deferred).
+  // Recent chat history, oldest first. Always sent, but only actually used
+  // as the prompt when resumeSessionId is empty — see below.
   messages: TurnMessage[];
   // Command to spawn the orchestrator's hand-rolled MCP server over stdio,
   // already scoped to this turn's agent id by the caller.
@@ -21,6 +21,11 @@ interface TurnRequest {
   // this lets the worker borrow a real user's cached session instead of
   // requiring ANTHROPIC_API_KEY. Empty if not configured.
   claudeConfigDir: string;
+  // SDK session id from a previous turn for this (agent, chat) pair, if
+  // the orchestrator has one on file. When set, the SDK reloads that
+  // session's full history itself (via `resume`), so the prompt only needs
+  // to carry the newest message rather than the whole transcript again.
+  resumeSessionId: string;
 }
 
 async function readStdin(): Promise<string> {
@@ -33,6 +38,7 @@ async function readStdin(): Promise<string> {
 
 async function main(): Promise<void> {
   let response = "";
+  let sessionId = "";
   let errorMessage = "";
 
   try {
@@ -43,10 +49,19 @@ async function main(): Promise<void> {
       process.env.CLAUDE_CONFIG_DIR = request.claudeConfigDir;
     }
 
-    const transcript = request.messages
-      .map((m) => `[${m.senderType}:${m.senderId}] ${m.content}`)
-      .join("\n");
-    const prompt = `${transcript}\n\nRespond with your next message in the conversation above.`;
+    let prompt: string;
+    if (request.resumeSessionId) {
+      // Resuming: the SDK already has everything up through this agent's
+      // last turn loaded from the session file — only the newest message
+      // (the one that triggered this turn) needs to go in fresh.
+      const latest = request.messages[request.messages.length - 1];
+      prompt = latest?.content ?? "";
+    } else {
+      const transcript = request.messages
+        .map((m) => `[${m.senderType}:${m.senderId}] ${m.content}`)
+        .join("\n");
+      prompt = `${transcript}\n\nRespond with your next message in the conversation above.`;
+    }
 
     for await (const message of query({
       prompt,
@@ -66,9 +81,11 @@ async function main(): Promise<void> {
         // only tools available are our own scoped MCP tools.
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
+        ...(request.resumeSessionId ? { resume: request.resumeSessionId } : {}),
       },
     })) {
       if (message.type === "result") {
+        sessionId = message.session_id;
         if (message.subtype === "success") {
           response = message.result;
         } else {
@@ -85,7 +102,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  process.stdout.write(JSON.stringify({ response }) + "\n");
+  process.stdout.write(JSON.stringify({ response, sessionId }) + "\n");
 }
 
 main();

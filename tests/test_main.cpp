@@ -1,6 +1,7 @@
 #include <iostream>
 #include <string>
 
+#include "../src/db/AgentSessionStore.h"
 #include "../src/db/AgentStore.h"
 #include "../src/db/ApprovalStore.h"
 #include "../src/db/ChatStore.h"
@@ -134,6 +135,38 @@ void TestAgentStoreBotToken() {
         cleared.discordBotTokenEncrypted.empty() && cleared.discordBotUserId.empty() &&
             cleared.discordBotUsername.empty(),
         "AgentStore: ClearDiscordBotToken removes all three fields");
+}
+
+void TestAgentSessionStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    AgentSessionStore store(db);
+
+    std::string sessionId;
+    Check(
+        !store.Get("alex", "chat-1", sessionId),
+        "AgentSessionStore: Get returns false when no session is stored yet");
+
+    Check(store.Set("alex", "chat-1", "session-abc"), "AgentSessionStore: Set succeeds");
+    Check(
+        store.Get("alex", "chat-1", sessionId) && sessionId == "session-abc",
+        "AgentSessionStore: Get round-trips what Set stored");
+
+    // Same agent, different chat — must not collide.
+    std::string otherChatSession;
+    Check(
+        !store.Get("alex", "chat-2", otherChatSession),
+        "AgentSessionStore: sessions are scoped per (agent, chat), not just agent");
+
+    Check(store.Set("alex", "chat-1", "session-xyz"), "AgentSessionStore: Set again (upsert) succeeds");
+    store.Get("alex", "chat-1", sessionId);
+    Check(sessionId == "session-xyz", "AgentSessionStore: a second Set overwrites the stored session id");
+
+    Check(store.Clear("alex", "chat-1"), "AgentSessionStore: Clear succeeds");
+    Check(
+        !store.Get("alex", "chat-1", sessionId),
+        "AgentSessionStore: a cleared session no longer round-trips");
 }
 
 void TestChatStore() {
@@ -388,6 +421,7 @@ int main() {
     TestSchema();
     TestAgentStore();
     TestAgentStoreBotToken();
+    TestAgentSessionStore();
     TestChatStore();
     TestMcpServer();
     TestApprovalWorkflowTool();

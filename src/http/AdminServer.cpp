@@ -61,8 +61,13 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json& outBod
 
 } // namespace
 
-AdminServer::AdminServer(AgentStore& agentStore, std::wstring dbPath, std::string claudeConfigDir)
-    : agentStore_(agentStore), dbPath_(std::move(dbPath)), claudeConfigDir_(std::move(claudeConfigDir)) {}
+AdminServer::AdminServer(
+    AgentStore& agentStore, AgentSessionStore& agentSessionStore, std::wstring dbPath,
+    std::string claudeConfigDir)
+    : agentStore_(agentStore),
+      agentSessionStore_(agentSessionStore),
+      dbPath_(std::move(dbPath)),
+      claudeConfigDir_(std::move(claudeConfigDir)) {}
 
 AdminServer::~AdminServer() = default;
 
@@ -257,11 +262,21 @@ void AdminServer::Run(int port) {
         contextMessage.content = context.str();
         contextMessage.createdAt = static_cast<int64_t>(time(nullptr));
 
+        const std::string reviseChatId = "desktop-revise-" + target.id;
+        std::string resumeSessionId;
+        agentSessionStore_.Get(alex.id, reviseChatId, resumeSessionId);
+
         const AgentTurnResult result = AgentTurn::Run(
-            alex, {contextMessage}, dbPath_, claudeConfigDir_, "desktop-revise-" + target.id);
+            alex, {contextMessage}, dbPath_, claudeConfigDir_, reviseChatId, resumeSessionId);
         if (!result.ok) {
+            if (!resumeSessionId.empty()) {
+                agentSessionStore_.Clear(alex.id, reviseChatId);
+            }
             SendError(res, 502, result.error);
             return;
+        }
+        if (!result.sdkSessionId.empty()) {
+            agentSessionStore_.Set(alex.id, reviseChatId, result.sdkSessionId);
         }
 
         Agent updated = target;

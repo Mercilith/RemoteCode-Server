@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 
+#include "../db/AgentSessionStore.h"
 #include "../db/AgentStore.h"
 
 namespace httplib {
@@ -17,9 +18,13 @@ class Server;
 // token's own trust boundary).
 class AdminServer {
 public:
-    // dbPath/claudeConfigDir are only needed for the /revise endpoint,
-    // which spawns a real Alex turn the same way Orchestrator does.
-    AdminServer(AgentStore& agentStore, std::wstring dbPath, std::string claudeConfigDir);
+    // dbPath/claudeConfigDir/agentSessionStore are only needed for the
+    // /revise endpoint, which spawns a real Alex turn the same way
+    // Orchestrator does (including resuming a prior revise session for the
+    // same agent, if one exists).
+    AdminServer(
+        AgentStore& agentStore, AgentSessionStore& agentSessionStore, std::wstring dbPath,
+        std::string claudeConfigDir);
     ~AdminServer();
 
     AdminServer(const AdminServer&) = delete;
@@ -31,6 +36,7 @@ public:
 
 private:
     AgentStore& agentStore_;
+    AgentSessionStore& agentSessionStore_;
     std::wstring dbPath_;
     std::string claudeConfigDir_;
     std::unique_ptr<httplib::Server> server_;

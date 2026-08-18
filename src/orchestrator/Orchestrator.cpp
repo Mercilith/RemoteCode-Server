@@ -70,6 +70,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     chatStore_ = std::make_unique<ChatStore>(*db_);
     agentStore_ = std::make_unique<AgentStore>(*db_);
     approvalStore_ = std::make_unique<ApprovalStore>(*db_);
+    agentSessionStore_ = std::make_unique<AgentSessionStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
 
     const ServerConfig config = ServerConfigStore::Load();
@@ -79,7 +80,8 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // (list/create/edit, assigning a bot token) is useful even before
     // Discord is set up, and /revise degrades gracefully (Alex just can't
     // post anywhere, but can still update the agent record).
-    adminServer_ = std::make_unique<AdminServer>(*agentStore_, dbPath_, claudeConfigDir_);
+    adminServer_ =
+        std::make_unique<AdminServer>(*agentStore_, *agentSessionStore_, dbPath_, claudeConfigDir_);
     std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
     log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
 
@@ -169,12 +171,26 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             continue;
         }
 
+        std::string resumeSessionId;
+        agentSessionStore_->Get(agent.id, chatId, resumeSessionId);
+
         const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
-        const AgentTurnResult turnResult = AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_, chatId);
+        const AgentTurnResult turnResult =
+            AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId);
         if (!turnResult.ok) {
             log_(L"Orchestrator: turn failed for agent '" + AsciiToWide(agent.id) + L"': " +
                  AsciiToWide(turnResult.error));
+            if (!resumeSessionId.empty()) {
+                // The resume itself may be what failed (stale/missing
+                // session file) — drop it so the next turn starts fresh
+                // with full history instead of repeatedly failing the
+                // same way.
+                agentSessionStore_->Clear(agent.id, chatId);
+            }
             continue;
+        }
+        if (!turnResult.sdkSessionId.empty()) {
+            agentSessionStore_->Set(agent.id, chatId, turnResult.sdkSessionId);
         }
 
         Message reply;

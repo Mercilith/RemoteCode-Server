@@ -8,8 +8,9 @@
 
 struct AgentTurnResult {
     bool ok = false;
-    std::string response; // agent's reply text, valid when ok
-    std::string error;    // human-readable failure reason, valid when !ok
+    std::string response;    // agent's reply text, valid when ok
+    std::string sdkSessionId; // Agent SDK session id from this turn, valid when ok
+    std::string error;       // human-readable failure reason, valid when !ok
 };
 
 // Spawns the Node/TypeScript worker subprocess (worker/src/index.ts) for a
@@ -24,7 +25,12 @@ public:
     // point the Agent SDK at an already-authenticated user's Claude Code
     // config directory (normally %USERPROFILE%\.claude) — the Windows
     // Service runs as SYSTEM, which has no OAuth session of its own.
+    //
+    // `resumeSessionId`, if non-empty, is forwarded so the worker resumes
+    // that Agent SDK session (via its own `resume` option) instead of
+    // replaying `recentMessages` as a fresh transcript — see
+    // AgentSessionStore. Pass an empty string to always start fresh.
     static AgentTurnResult Run(
         const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
-        const std::string& claudeConfigDir, const std::string& chatId);
+        const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId);
 };
