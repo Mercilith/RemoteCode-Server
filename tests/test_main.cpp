@@ -5,6 +5,7 @@
 #include "../src/db/AgentStore.h"
 #include "../src/db/ApprovalStore.h"
 #include "../src/db/ChatStore.h"
+#include "../src/db/ChatSummaryStore.h"
 #include "../src/db/Database.h"
 #include "../src/db/Schema.h"
 #include "../src/greeting.h"
@@ -191,6 +192,40 @@ void TestAgentSessionStore() {
     Check(
         !store.Get("alex", "chat-1", sessionId),
         "AgentSessionStore: a cleared session no longer round-trips");
+}
+
+void TestChatSummaryStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatSummaryStore store(db);
+
+    std::string summary;
+    int64_t throughMessageId = -1;
+    Check(
+        !store.Get("chat-1", summary, throughMessageId),
+        "ChatSummaryStore: Get returns false when nothing is stored yet");
+
+    Check(store.Set("chat-1", "Alice and Bob discussed the roadmap.", 42), "ChatSummaryStore: Set succeeds");
+    Check(
+        store.Get("chat-1", summary, throughMessageId) &&
+            summary == "Alice and Bob discussed the roadmap." && throughMessageId == 42,
+        "ChatSummaryStore: Get round-trips what Set stored");
+
+    // Different chat must not collide.
+    std::string otherSummary;
+    int64_t otherThrough = -1;
+    Check(
+        !store.Get("chat-2", otherSummary, otherThrough),
+        "ChatSummaryStore: summaries are scoped per chat");
+
+    Check(
+        store.Set("chat-1", "Updated summary through message 99.", 99),
+        "ChatSummaryStore: Set again (upsert) succeeds");
+    store.Get("chat-1", summary, throughMessageId);
+    Check(
+        summary == "Updated summary through message 99." && throughMessageId == 99,
+        "ChatSummaryStore: a second Set overwrites the stored summary and watermark");
 }
 
 void TestChatStore() {
@@ -896,6 +931,7 @@ int main() {
     TestAgentStore();
     TestAgentStoreBotToken();
     TestAgentSessionStore();
+    TestChatSummaryStore();
     TestChatStore();
     TestMcpServer();
     TestApprovalWorkflowTool();
