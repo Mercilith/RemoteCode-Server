@@ -11,6 +11,7 @@
 #include "../db/AgentStore.h"
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
+#include "../db/ChatSummaryStore.h"
 #include "../db/Database.h"
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
@@ -60,6 +61,14 @@ private:
     // Posts any newly-created approval drafts (from submit_agent_for_approval)
     // to Discord with the approve/reject reactions seeded on them.
     void PostPendingApprovals();
+    // Best-effort housekeeping: if `chatId` has grown by more than
+    // kSummaryThreshold messages since the current chat_summaries watermark
+    // (0 if none yet), runs a summarizer turn over the messages since that
+    // watermark and updates the stored summary. Called at most once per
+    // HandleIncomingMessage invocation, near PostPendingApprovals — never
+    // once per agent turn. Logs and returns without throwing if the
+    // summarizer turn fails; this must never block real dispatch.
+    void RefreshChatSummaryIfNeeded(const std::string& chatId);
     void HandleReaction(const std::string& discordMessageId, const std::string& emoji);
 
     // Posts `content` into `channelId` as `agent` — via `agent`'s own
@@ -98,6 +107,7 @@ private:
     std::unique_ptr<AgentStore> agentStore_;
     std::unique_ptr<ApprovalStore> approvalStore_;
     std::unique_ptr<AgentSessionStore> agentSessionStore_;
+    std::unique_ptr<ChatSummaryStore> chatSummaryStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;
     std::unique_ptr<ActivityLog> activityLog_;

@@ -94,6 +94,18 @@ constexpr int kMaxAgentChainTurns = 8;
 // resuming it, rather than resuming indefinitely.
 constexpr int64_t kSessionIdleTimeoutSeconds = 3600;
 
+// How many messages may accumulate past the chat_summaries watermark before
+// a refresh runs — rare housekeeping, not a per-turn cost multiplier (see
+// RefreshChatSummaryIfNeeded, called at most once per HandleIncomingMessage
+// call).
+constexpr int64_t kSummaryThreshold = 60;
+
+// Caps how many messages since the summary watermark get fed into the
+// summarizer turn itself, so that call doesn't blow its own context if the
+// chat has grown well past kSummaryThreshold before a refresh happens to
+// run (e.g. after downtime).
+constexpr int kSummaryInputCap = 150;
+
 } // namespace
 
 void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
@@ -117,6 +129,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     agentStore_ = std::make_unique<AgentStore>(*db_);
     approvalStore_ = std::make_unique<ApprovalStore>(*db_);
     agentSessionStore_ = std::make_unique<AgentSessionStore>(*db_);
+    chatSummaryStore_ = std::make_unique<ChatSummaryStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
 
     // Sits next to the DB file (…\ServerData\logs\) — see util/ActivityLog.
@@ -362,7 +375,34 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         std::string resumeSessionId;
         agentSessionStore_->GetIfFresh(agent.id, chatId, kSessionIdleTimeoutSeconds, resumeSessionId);
 
-        const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
+        // Fresh session (first turn ever, or a resume that failed/was
+        // dropped): if there's a chat summary, bootstrap context with it —
+        // a synthetic system message carrying the summary, plus the real
+        // messages since its cutoff — instead of the flat last-50 window,
+        // so continuity isn't lost once a chat has grown past that window.
+        // No summary yet: unchanged behavior (last 50 raw messages).
+        std::vector<Message> recent;
+        if (resumeSessionId.empty()) {
+            std::string summary;
+            int64_t throughMessageId = 0;
+            if (chatSummaryStore_->Get(chatId, summary, throughMessageId)) {
+                Message summaryMessage; // synthetic — never persisted to the DB
+                summaryMessage.chatId = chatId;
+                summaryMessage.senderType = "system";
+                summaryMessage.senderId = "system";
+                summaryMessage.type = "text";
+                summaryMessage.content = "[Summary of earlier conversation: " + summary + "]";
+                summaryMessage.createdAt = static_cast<int64_t>(time(nullptr));
+                recent.push_back(std::move(summaryMessage));
+                for (Message& m : chatStore_->MessagesAfter(chatId, throughMessageId)) {
+                    recent.push_back(std::move(m));
+                }
+            } else {
+                recent = chatStore_->RecentMessages(chatId, 50);
+            }
+        } else {
+            recent = chatStore_->RecentMessages(chatId, 50);
+        }
         const AgentTurnResult turnResult = AgentTurn::Run(
             agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId, logDir_, entry.tagged);
         if (!turnResult.ok) {
@@ -475,6 +515,66 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     // live Discord connection) — post any such drafts now that we're back
     // on the orchestrator's own thread with a real DiscordBot.
     PostPendingApprovals();
+
+    // Best-effort summary housekeeping — once per HandleIncomingMessage
+    // call (not once per agent turn above), after real dispatch is done.
+    RefreshChatSummaryIfNeeded(chatId);
+}
+
+void Orchestrator::RefreshChatSummaryIfNeeded(const std::string& chatId) {
+    std::string existingSummary;
+    int64_t throughMessageId = 0;
+    chatSummaryStore_->Get(chatId, existingSummary, throughMessageId); // ok to ignore false (no summary yet)
+
+    const int64_t latestId = chatStore_->LatestMessageId(chatId);
+    if (latestId - throughMessageId <= kSummaryThreshold) {
+        return;
+    }
+
+    std::vector<Message> toSummarize = chatStore_->MessagesAfter(chatId, throughMessageId);
+    if (static_cast<int>(toSummarize.size()) > kSummaryInputCap) {
+        // Keep only the most recent kSummaryInputCap so the summarizer call
+        // itself doesn't blow its own context.
+        toSummarize.erase(toSummarize.begin(), toSummarize.end() - kSummaryInputCap);
+    }
+    if (toSummarize.empty()) {
+        return;
+    }
+
+    // A pseudo-agent, deliberately NOT persisted to AgentStore. Because
+    // "chat-summarizer" has no backing AgentStore row, Tools::Call's
+    // tool-permission enforcement (ctx.agentStore.Get(ctx.agentId, agent))
+    // fails closed with "unknown agent" on ANY tool call this turn might
+    // attempt — that's intentional and load-bearing: it sandboxes the
+    // summarizer from ever posting messages, calling tools, or having any
+    // side effect beyond returning summary text. Do not "fix" this by
+    // seeding a real AgentStore row for this id.
+    Agent summarizer;
+    summarizer.id = "chat-summarizer";
+    summarizer.name = "Chat Summarizer";
+    summarizer.systemPrompt =
+        "You summarize a multi-agent chat conversation concisely and factually, "
+        "preserving key facts, decisions, and open questions. Respond with ONLY "
+        "the summary text - no preamble, no meta-commentary.";
+
+    const AgentTurnResult turnResult =
+        AgentTurn::Run(summarizer, toSummarize, dbPath_, claudeConfigDir_, chatId, /*resumeSessionId=*/"", logDir_, /*tagged=*/true);
+    if (!turnResult.ok) {
+        log_(L"Orchestrator: chat summary refresh failed for chat '" + AsciiToWide(chatId) + L"': " +
+             AsciiToWide(turnResult.error));
+        return;
+    }
+
+    const std::string trimmedSummary = TrimWhitespace(turnResult.response);
+    if (trimmedSummary.empty()) {
+        log_(L"Orchestrator: chat summary refresh for chat '" + AsciiToWide(chatId) +
+             L"' produced an empty summary — skipping update.");
+        return;
+    }
+
+    if (!chatSummaryStore_->Set(chatId, trimmedSummary, latestId)) {
+        log_(L"Orchestrator: failed to persist refreshed chat summary for chat '" + AsciiToWide(chatId) + L"'.");
+    }
 }
 
 int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {

@@ -77,6 +77,7 @@ add_executable(RemoteCodeServer
     src/db/ChatStore.cpp
     src/db/ApprovalStore.cpp
     src/db/AgentSessionStore.cpp
+    src/db/ChatSummaryStore.cpp
     src/config/ServerConfig.cpp
     src/config/Secrets.cpp
     src/discord/DiscordBot.cpp
