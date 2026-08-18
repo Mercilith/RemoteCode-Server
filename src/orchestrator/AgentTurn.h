@@ -34,8 +34,14 @@ public:
     // `logDir`, if non-empty, is forwarded to the spawned MCP subprocess
     // (via --log-dir) so its own tool-call activity gets logged next to the
     // orchestrator's — see util/ActivityLog.
+    //
+    // `tagged` tells the worker whether the message that triggered this
+    // turn explicitly @tagged this agent — every active agent in a chat
+    // gets a turn on every message now, so this is what distinguishes "you
+    // should respond" from "reply only if you judge it useful, silence is
+    // fine." See the addressingNote built into worker/src/index.ts's prompt.
     static AgentTurnResult Run(
         const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
         const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId,
-        const std::wstring& logDir);
+        const std::wstring& logDir, bool tagged);
 };

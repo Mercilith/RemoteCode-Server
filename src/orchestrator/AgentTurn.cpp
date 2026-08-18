@@ -165,7 +165,7 @@ bool ParseLastJsonLine(const std::string& output, json& outParsed) {
 AgentTurnResult AgentTurn::Run(
     const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
     const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId,
-    const std::wstring& logDir) {
+    const std::wstring& logDir, bool tagged) {
     AgentTurnResult result;
 
     std::wstring workerDir, tsxCliPath;
@@ -192,6 +192,7 @@ AgentTurnResult AgentTurn::Run(
          WideToUtf8(logDir)});
     request["claudeConfigDir"] = claudeConfigDir;
     request["resumeSessionId"] = resumeSessionId;
+    request["tagged"] = tagged;
 
     const std::wstring commandLine = L"node.exe \"" + tsxCliPath + L"\" \"src/index.ts\"";
 

@@ -270,8 +270,11 @@ void AdminServer::Run(int port) {
         std::string resumeSessionId;
         agentSessionStore_.Get(alex.id, reviseChatId, resumeSessionId);
 
+        // Treated as tagged: Cardon asked Alex directly for this, unlike an
+        // ordinary chat turn where a reply may or may not be warranted.
         const AgentTurnResult result = AgentTurn::Run(
-            alex, {contextMessage}, dbPath_, claudeConfigDir_, reviseChatId, resumeSessionId, logDir_);
+            alex, {contextMessage}, dbPath_, claudeConfigDir_, reviseChatId, resumeSessionId, logDir_,
+            /*tagged=*/true);
         if (!result.ok) {
             if (!resumeSessionId.empty()) {
                 agentSessionStore_.Clear(alex.id, reviseChatId);

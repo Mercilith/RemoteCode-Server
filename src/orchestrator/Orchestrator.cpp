@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <ctime>
 #include <deque>
@@ -28,6 +29,37 @@ namespace {
 // hand-written error strings) — a byte-for-byte widen is exact.
 std::wstring AsciiToWide(const std::string& s) {
     return std::wstring(s.begin(), s.end());
+}
+
+// Used to decide whether an untagged agent's turn actually said something
+// or genuinely chose to stay silent (a bare response of "  \n" shouldn't
+// count as a reply any more than "" does).
+std::string TrimWhitespace(const std::string& s) {
+    const size_t begin = s.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    const size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(begin, end - begin + 1);
+}
+
+// True if `trimmed` is (modulo case and a little stray punctuation/markup
+// models tend to add despite instructions not to, e.g. "*SILENT.*") the
+// SILENT sentinel worker/src/index.ts's prompt asks for. Deliberately more
+// lenient than an exact match — an untagged agent choosing not to reply
+// should never accidentally count as "said something."
+bool IsSilenceSentinel(const std::string& trimmed) {
+    std::string s = trimmed;
+    while (!s.empty() && std::string("*_.!\"'").find(s.back()) != std::string::npos) {
+        s.pop_back();
+    }
+    while (!s.empty() && std::string("*_\"'").find(s.front()) != std::string::npos) {
+        s.erase(s.begin());
+    }
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s == "silent";
 }
 
 std::wstring DbPath() {
@@ -249,43 +281,44 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
     }
 
-    // How many agents are actually "in" this conversation right now — the
-    // practical proxy for 1:1 vs. group, since there's always exactly one
-    // human. A disabled/pending participant row doesn't count.
-    int activeParticipantCount = 0;
-    for (const Agent& a : participants) {
-        if (a.status == "active") {
-            ++activeParticipantCount;
+    // Every active agent in the chat takes every message into context —
+    // dispatched a turn on every message, tagged or not (this is what keeps
+    // a resumed SDK session's view of the conversation gapless). `tagged`
+    // just tells that turn whether it's expected to reply (see the
+    // addressingNote worker/src/index.ts builds into the prompt) or free to
+    // stay silent — an empty response below is simply not posted, not an
+    // error. The turn-limit guard is what keeps this from spiraling if
+    // agents turn out chattier than expected, not addressing gating.
+    struct QueueEntry {
+        std::string agentId;
+        bool tagged;
+    };
+    std::deque<QueueEntry> queue;
+    auto enqueue = [&queue](const std::string& id, bool tagged) {
+        for (QueueEntry& entry : queue) {
+            if (entry.agentId == id) {
+                entry.tagged = entry.tagged || tagged; // never downgrade an already-tagged entry
+                return;
+            }
         }
-    }
+        queue.push_back({id, tagged});
+    };
 
-    // Seed: if the triggering (human) message explicitly @tagged one or
-    // more participants, only they run. Otherwise: in a 1:1 chat (exactly
-    // one active agent participant) a message is implicitly addressed to
-    // that agent, same as before tagging existed. In a group chat (2+
-    // active agents), an untagged message has no way to know who it's for
-    // — per spec it's just logged (which already happened before this
-    // function ran), with no auto-response, rather than broadcasting to
-    // everyone. Anything queued after this point instead comes from an
-    // agent explicitly @tagging another agent (see below).
     std::string triggeringContent;
     const std::vector<Message> latest = chatStore_->RecentMessages(chatId, 1);
     if (!latest.empty()) {
         triggeringContent = latest.back().content;
     }
     const std::vector<std::string> taggedInTrigger = Mentions::ParseMentions(triggeringContent, participants);
-    std::vector<std::string> seedIds;
-    if (!taggedInTrigger.empty()) {
-        seedIds = taggedInTrigger;
-    } else if (activeParticipantCount <= 1) {
-        seedIds = participantIds;
+    for (const std::string& id : participantIds) {
+        const bool tagged = std::find(taggedInTrigger.begin(), taggedInTrigger.end(), id) != taggedInTrigger.end();
+        enqueue(id, tagged);
     }
-    // else: group chat, no explicit tags — seed nobody.
-    std::deque<std::string> queue(seedIds.begin(), seedIds.end());
 
     while (!queue.empty()) {
-        const std::string agentId = queue.front();
+        const QueueEntry entry = queue.front();
         queue.pop_front();
+        const std::string& agentId = entry.agentId;
 
         Agent agent;
         if (!agentStore_->Get(agentId, agent) || agent.status != "active") {
@@ -313,7 +346,7 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             break;
         }
 
-        activityLog_->Log(chatId, agent.id, "turn_start");
+        activityLog_->Log(chatId, agent.id, "turn_start", json{{"tagged", entry.tagged}});
 
         // Global (not chat-scoped) watermark — a turn's messages aren't
         // confined to the chat it ran in (message_user writes into the
@@ -325,8 +358,8 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         agentSessionStore_->Get(agent.id, chatId, resumeSessionId);
 
         const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
-        const AgentTurnResult turnResult =
-            AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId, logDir_);
+        const AgentTurnResult turnResult = AgentTurn::Run(
+            agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId, logDir_, entry.tagged);
         if (!turnResult.ok) {
             log_(L"Orchestrator: turn failed for agent '" + AsciiToWide(agent.id) + L"': " +
                  AsciiToWide(turnResult.error));
@@ -343,7 +376,21 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         if (!turnResult.sdkSessionId.empty()) {
             agentSessionStore_->Set(agent.id, chatId, turnResult.sdkSessionId);
         }
-        activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", true}});
+
+        // An agent that wasn't tagged is free to judge silence is the right
+        // call — treat an empty response OR the SILENT sentinel as "chose
+        // not to reply," not a bug: nothing gets inserted, mirrored to
+        // Discord, or scanned for tags, and it doesn't count toward the
+        // turn limit (CountTrailingAgentTurns only counts real inserted
+        // messages). Both forms are checked — models tend to prefer writing
+        // *something* (the sentinel) over truly empty output, but accepting
+        // either means neither convention alone has to be perfectly reliable.
+        const std::string trimmedResponse = TrimWhitespace(turnResult.response);
+        if (trimmedResponse.empty() || IsSilenceSentinel(trimmedResponse)) {
+            activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", true}, {"replied", false}});
+            continue;
+        }
+        activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", true}, {"replied", true}});
 
         Message reply;
         reply.chatId = chatId;
@@ -359,8 +406,8 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         // subprocess made mid-turn (it only ever writes to the DB; it has
         // no live Discord connection of its own), plus any message_user
         // calls (which write into this agent's own separate DM chat) —
-        // gets mirrored to Discord and scanned for tags here, on the
-        // orchestrator's own thread, in one place.
+        // gets mirrored to Discord and broadcast to the rest of this chat
+        // here, on the orchestrator's own thread, in one place.
         for (const Message& produced : chatStore_->MessagesBySenderAfter(agent.id, maxIdBeforeTurn)) {
             // approval_request messages are posted separately by
             // PostPendingApprovals (with the approve/reject reactions
@@ -392,27 +439,28 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             }
 
             // A DM chat has exactly one agent participant — nothing to
-            // address, so tag-driven dispatch never runs against it.
-            if (produced.chatId.rfind("dm-", 0) == 0) {
+            // broadcast to. A message posted into some other, unrelated
+            // chat (e.g. an explicit post_message chat_id, or a fresh
+            // start_chat) isn't this chat's concern either — participants/
+            // participantIds below are scoped to `chatId`, not that chat.
+            if (produced.chatId.rfind("dm-", 0) == 0 || produced.chatId != chatId) {
                 continue;
             }
 
-            for (const std::string& targetId : Mentions::ParseMentions(produced.content, participants)) {
-                if (targetId == produced.senderId) {
+            // Every other active participant of this chat takes this
+            // message into context too — tagged if @mentioned (nudged to
+            // reply), otherwise free to judge for itself. can_message isn't
+            // consulted here: it gates explicit addressing (start_chat,
+            // message_user's target), not "who's allowed to be in the
+            // room" for a chat everyone here already belongs to.
+            const std::vector<std::string> mentionedHere = Mentions::ParseMentions(produced.content, participants);
+            for (const std::string& otherId : participantIds) {
+                if (otherId == produced.senderId) {
                     continue; // no self-trigger
                 }
-                if (!Mentions::IsAllowedToMessage(agent, targetId)) {
-                    activityLog_->Log(chatId, produced.senderId, "mention_blocked", json{{"target", targetId}});
-                    continue;
-                }
-                // Don't double-queue an agent that's already waiting to run
-                // this pass (e.g. two different messages in the same turn
-                // both tagging the same target) — a *later*, separate
-                // dispatch pass tagging them again is still fine and is
-                // what the turn-limit guard exists for.
-                if (std::find(queue.begin(), queue.end(), targetId) == queue.end()) {
-                    queue.push_back(targetId);
-                }
+                const bool taggedHere =
+                    std::find(mentionedHere.begin(), mentionedHere.end(), otherId) != mentionedHere.end();
+                enqueue(otherId, taggedHere);
             }
         }
     }

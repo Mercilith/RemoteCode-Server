@@ -26,6 +26,12 @@ interface TurnRequest {
   // session's full history itself (via `resume`), so the prompt only needs
   // to carry the newest message rather than the whole transcript again.
   resumeSessionId: string;
+  // True if the message that triggered this turn explicitly @tagged this
+  // agent. Every active agent in a chat gets a turn on every message (so
+  // it's always in context) — this tells it whether a reply is expected
+  // (tagged) or optional, its own call (not tagged). See addressingNote
+  // below, which is what actually carries this to the model.
+  tagged: boolean;
 }
 
 async function readStdin(): Promise<string> {
@@ -49,18 +55,39 @@ async function main(): Promise<void> {
       process.env.CLAUDE_CONFIG_DIR = request.claudeConfigDir;
     }
 
+    // Every active agent in a chat gets a turn on every message now (not
+    // just ones that @tag it), so it stays free-form conversational rather
+    // than a rigid always-must-reply loop — this is what tells the model
+    // whether a reply is expected or genuinely optional this turn. Repeated
+    // on every turn (not just baked into systemPrompt) because a resumed
+    // turn's prompt is otherwise just the bare latest message, and tagged
+    // status varies message to message.
+    // Models are reluctant to emit a truly empty response even when told
+    // to — they tend to write something like "(no response needed)"
+    // instead, which is non-empty text that gets posted as a real message.
+    // An exact sentinel word is far more reliable than "say nothing."
+    const addressingNote = request.tagged
+      ? "[You were explicitly @tagged in this message — you should respond.]"
+      : "[You were not @tagged in this message. Only reply if you genuinely have " +
+        'something useful to add; otherwise your ENTIRE response must be exactly ' +
+        'the single word SILENT and nothing else (no punctuation, no parentheses, ' +
+        'no explanation) — that is how you decline to reply, and it is expected ' +
+        "and normal, not a failure.]";
+
     let prompt: string;
     if (request.resumeSessionId) {
       // Resuming: the SDK already has everything up through this agent's
       // last turn loaded from the session file — only the newest message
       // (the one that triggered this turn) needs to go in fresh.
       const latest = request.messages[request.messages.length - 1];
-      prompt = latest?.content ?? "";
+      prompt = `${addressingNote}\n\n${latest?.content ?? ""}`;
     } else {
       const transcript = request.messages
         .map((m) => `[${m.senderType}:${m.senderId}] ${m.content}`)
         .join("\n");
-      prompt = `${transcript}\n\nRespond with your next message in the conversation above.`;
+      prompt =
+        `${transcript}\n\n${addressingNote}\nRespond with your next message in the ` +
+        `conversation above, or SILENT if you're choosing not to respond.`;
     }
 
     for await (const message of query({
