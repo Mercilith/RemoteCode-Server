@@ -6,7 +6,7 @@ struct ServerConfig {
     std::string discordBotToken; // plaintext once loaded into memory
     std::string discordGuildId;
     // Cardon's Discord user id — the only human ever granted access to a
-    // per-agent private DM channel (see Orchestrator::EnsureDmChannel).
+    // per-agent private DM channel (see Orchestrator::EnsureChannelForChat).
     // No auto-detection exists for "who is Cardon" and doesn't need to on
     // a personal single-user system; set by hand like discordGuildId.
     std::string discordOwnerUserId;

@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "../db/AgentStore.h"
 #include "../db/ChatStore.h"
@@ -78,13 +79,14 @@ public:
 
     // Creates a private text channel in `guildId` named `channelName`,
     // denies @everyone view, and grants view/send/read-history to
-    // `humanUserId` and this bot's own account, plus `extraBotUserId` too
-    // if non-empty (an agent's own bot, when it has one — it may end up
-    // posting there instead of this shared bot). Returns the new channel's
-    // id, or an empty string on failure.
+    // `humanUserId`, this bot's own account, and every id in
+    // `extraBotUserIds` (each participating agent's own bot, when it has
+    // one — it may end up posting there instead of this shared bot; empty
+    // ids are skipped). Returns the new channel's id, or an empty string on
+    // failure.
     std::string CreateDmChannel(
         const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
-        const std::string& extraBotUserId);
+        const std::vector<std::string>& extraBotUserIds);
 
     // True if shard 0 hasn't received a heartbeat ACK from Discord in an
     // unreasonably long time — the local socket can look connected (and

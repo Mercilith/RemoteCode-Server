@@ -3,6 +3,7 @@
 #include <ctime>
 #include <sstream>
 
+#include "../util/Mentions.h"
 #include "../util/Text.h"
 
 using nlohmann::json;
@@ -64,7 +65,7 @@ json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError)
         dmChat.status = "active";
         // discordChannelId left empty on purpose — Orchestrator creates the
         // real private Discord channel lazily the first time this chat has
-        // something to mirror (see Orchestrator::EnsureDmChannel), the same
+        // something to mirror (see Orchestrator::EnsureChannelForChat), the same
         // way every other Discord side-effect happens after a turn returns.
         dmChat.createdAt = static_cast<int64_t>(time(nullptr));
         if (!ctx.chatStore.CreateChat(dmChat)) {
@@ -239,6 +240,99 @@ json UpdateAgent(ToolContext& ctx, const json& arguments, std::string& outError)
     return json{{"agent_id", agent.id}, {"status", agent.status}};
 }
 
+json ListMyChats(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
+    json out = json::array();
+    for (const Chat& c : ctx.chatStore.ListChatsForParticipant(ctx.agentId)) {
+        out.push_back({{"id", c.id}, {"title", c.title}});
+    }
+    return json{{"chats", out}};
+}
+
+json StartChat(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("participant_ids") || !arguments["participant_ids"].is_array() ||
+        arguments["participant_ids"].empty()) {
+        outError = "start_chat requires a non-empty 'participant_ids' array";
+        return {};
+    }
+    if (!arguments.contains("initial_message")) {
+        outError = "start_chat requires 'initial_message'";
+        return {};
+    }
+
+    Agent sender;
+    if (!ctx.agentStore.Get(ctx.agentId, sender)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+
+    // Validate every target up front — reject the whole call (rather than
+    // silently dropping a bad id) if any target isn't a known, active agent
+    // or the caller's can_message doesn't permit messaging them.
+    std::vector<std::string> participantIds;
+    for (const json& idVal : arguments["participant_ids"]) {
+        if (!idVal.is_string()) {
+            outError = "start_chat: 'participant_ids' entries must be strings";
+            return {};
+        }
+        const std::string targetId = idVal.get<std::string>();
+        Agent target;
+        if (!ctx.agentStore.Get(targetId, target) || target.status != "active") {
+            outError = "start_chat: '" + targetId + "' is not a known, active agent";
+            return {};
+        }
+        if (!Mentions::IsAllowedToMessage(sender, targetId)) {
+            outError = "start_chat: you are not allowed to message '" + targetId + "' (see can_message)";
+            return {};
+        }
+        participantIds.push_back(targetId);
+    }
+
+    const std::string title = arguments.value("title", "");
+    // "agentchat-" (never "dm-", which is reserved for the single-agent DM
+    // mechanism and has special handling elsewhere) plus a timestamp for
+    // uniqueness — exact format doesn't matter beyond that.
+    const std::string chatId =
+        "agentchat-" + Slugify(title.empty() ? "chat" : title) + "-" + std::to_string(time(nullptr));
+
+    Chat chat;
+    chat.id = chatId;
+    chat.title = title;
+    chat.createdBy = ctx.agentId;
+    chat.status = "active";
+    // discordChannelId left empty on purpose — Orchestrator creates the real
+    // channel lazily the first time this chat has something to mirror (see
+    // Orchestrator::EnsureChannelForChat), the same way DM chats work.
+    chat.createdAt = static_cast<int64_t>(time(nullptr));
+    if (!ctx.chatStore.CreateChat(chat)) {
+        outError = "failed to create the chat";
+        return {};
+    }
+
+    // The calling agent plus every validated target join as "agent"
+    // participants. No explicit "user" participant row — like message_user's
+    // DM chats, human access is granted via Discord channel permissions at
+    // creation time (see Orchestrator::EnsureChannelForChat), not a
+    // chat_participants row.
+    ctx.chatStore.AddParticipant(chatId, "agent", ctx.agentId);
+    for (const std::string& id : participantIds) {
+        ctx.chatStore.AddParticipant(chatId, "agent", id);
+    }
+
+    Message message;
+    message.chatId = chatId;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "text";
+    message.content = arguments["initial_message"].get<std::string>();
+    message.createdAt = static_cast<int64_t>(time(nullptr));
+    if (ctx.chatStore.InsertMessage(message) < 0) {
+        outError = "failed to insert the initial message";
+        return {};
+    }
+
+    return json{{"chat_id", chatId}, {"status", "created"}};
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -333,6 +427,34 @@ json Tools::Definitions() {
                  {"required", json::array({"agent_id"})},
              }},
         },
+        {
+            {"name", "list_my_chats"},
+            {"description", "List every chat you currently participate in, with their ids and titles."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", json::object()},
+             }},
+        },
+        {
+            {"name", "start_chat"},
+            {"description",
+             "Start a new multi-agent chat with one or more other agents and post an initial message "
+             "into it. Every id in participant_ids must be a known, active agent that your can_message "
+             "permits messaging — the call is rejected outright if any target fails either check. "
+             "Returns the new chat's id (pass it as chat_id to post_message/read_chat afterward)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"participant_ids", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"title", {{"type", "string"}}},
+                      {"initial_message", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"participant_ids", "initial_message"})},
+             }},
+        },
     });
 }
 
@@ -350,6 +472,10 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = SubmitAgentForApproval(ctx, arguments, outError);
     } else if (toolName == "update_agent") {
         result = UpdateAgent(ctx, arguments, outError);
+    } else if (toolName == "list_my_chats") {
+        result = ListMyChats(ctx, arguments, outError);
+    } else if (toolName == "start_chat") {
+        result = StartChat(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }

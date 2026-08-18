@@ -21,10 +21,8 @@ struct ToolContext {
                           // the caller doesn't pass an explicit chat_id
 };
 
-// Tool definitions and dispatch for the hand-rolled MCP server. Only
-// post_message/read_chat/submit_agent_for_approval exist this pass — the
-// rest of the design doc's tool surface (start_chat, remember, list_agents,
-// etc.) comes later.
+// Tool definitions and dispatch for the hand-rolled MCP server. The rest of
+// the design doc's tool surface (remember, list_agents, etc.) comes later.
 class Tools {
 public:
     static nlohmann::json Definitions();
