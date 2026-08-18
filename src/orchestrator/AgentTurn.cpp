@@ -164,7 +164,8 @@ bool ParseLastJsonLine(const std::string& output, json& outParsed) {
 
 AgentTurnResult AgentTurn::Run(
     const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
-    const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId) {
+    const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId,
+    const std::wstring& logDir) {
     AgentTurnResult result;
 
     std::wstring workerDir, tsxCliPath;
@@ -187,7 +188,8 @@ AgentTurnResult AgentTurn::Run(
     request["messages"] = messages;
     request["mcpServerCommand"] = WideToUtf8(ExePath());
     request["mcpServerArgs"] = json::array(
-        {"--mcp-server", "--agent-id", agent.id, "--chat-id", chatId, "--db-path", WideToUtf8(dbPath)});
+        {"--mcp-server", "--agent-id", agent.id, "--chat-id", chatId, "--db-path", WideToUtf8(dbPath), "--log-dir",
+         WideToUtf8(logDir)});
     request["claudeConfigDir"] = claudeConfigDir;
     request["resumeSessionId"] = resumeSessionId;
 

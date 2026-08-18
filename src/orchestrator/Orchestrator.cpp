@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <deque>
 #include <filesystem>
 #include <thread>
 
@@ -12,6 +13,7 @@
 #include "../config/ServerConfig.h"
 #include "../db/Schema.h"
 #include "../third_party/json.hpp"
+#include "../util/Mentions.h"
 #include "AgentTurn.h"
 
 using nlohmann::json;
@@ -48,6 +50,11 @@ std::wstring DbPath() {
 constexpr const char* kApproveEmoji = "\xE2\x9C\x85"; // check mark
 constexpr const char* kRejectEmoji = "\xE2\x9D\x8C";  // cross mark
 
+// Caps how many agent-authored messages can pile up (since the last thing
+// a human said) before auto-dispatch stops — a blunt but effective guard
+// against any @tag cycle (A->B->A, fan-out, ...) regardless of its shape.
+constexpr int kMaxAgentChainTurns = 8;
+
 } // namespace
 
 void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
@@ -73,6 +80,17 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     agentSessionStore_ = std::make_unique<AgentSessionStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
 
+    // Sits next to the DB file (…\ServerData\logs\) — see util/ActivityLog.
+    // Per-turn detail (tool calls, blocked mentions, turn-limit trips) goes
+    // here as JSON lines, not into the DB, so it can be tailed/greped
+    // directly without a query tool.
+    {
+        const size_t slash = dbPath_.find_last_of(L"\\/");
+        const std::wstring serverDataDir = slash == std::wstring::npos ? L"." : dbPath_.substr(0, slash);
+        logDir_ = serverDataDir + L"\\logs";
+    }
+    activityLog_ = std::make_unique<ActivityLog>(logDir_, "orchestrator");
+
     const ServerConfig config = ServerConfigStore::Load();
     claudeConfigDir_ = config.claudeConfigDir;
 
@@ -80,8 +98,8 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // (list/create/edit, assigning a bot token) is useful even before
     // Discord is set up, and /revise degrades gracefully (Alex just can't
     // post anywhere, but can still update the agent record).
-    adminServer_ =
-        std::make_unique<AdminServer>(*agentStore_, *agentSessionStore_, dbPath_, claudeConfigDir_);
+    adminServer_ = std::make_unique<AdminServer>(
+        *agentStore_, *agentSessionStore_, dbPath_, claudeConfigDir_, logDir_);
     std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
     log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
 
@@ -164,22 +182,69 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         return;
     }
 
-    const std::vector<std::string> agentIds = chatStore_->ListParticipantAgentIds(chatId);
-    for (const std::string& agentId : agentIds) {
+    const std::vector<std::string> participantIds = chatStore_->ListParticipantAgentIds(chatId);
+    // Every tag ("@agentB") is resolved against this — the full participant
+    // roster, not just whoever's currently queued — so an agent can address
+    // any teammate in the chat, active or not (inactive/unknown ones just
+    // won't actually get dispatched below).
+    std::vector<Agent> participants;
+    for (const std::string& id : participantIds) {
+        Agent a;
+        if (agentStore_->Get(id, a)) {
+            participants.push_back(a);
+        }
+    }
+
+    // Seed: every active participant runs once, unchanged from before —
+    // this is what makes a real user/Discord message reach everyone in the
+    // chat. Anything queued after this point instead comes from an agent
+    // explicitly @tagging another agent (see below), never from a broadcast.
+    std::deque<std::string> queue(participantIds.begin(), participantIds.end());
+
+    while (!queue.empty()) {
+        const std::string agentId = queue.front();
+        queue.pop_front();
+
         Agent agent;
         if (!agentStore_->Get(agentId, agent) || agent.status != "active") {
             continue;
         }
+
+        if (CountTrailingAgentTurns(chatId) >= kMaxAgentChainTurns) {
+            log_(L"Orchestrator: turn limit reached in chat '" + AsciiToWide(chatId) + L"' — pausing "
+                 L"auto-dispatch until you say something.");
+            activityLog_->Log(chatId, agentId, "turn_limit_reached");
+
+            const std::string notice = "Turn limit reached (" + std::to_string(kMaxAgentChainTurns) +
+                " agent turns in a row) — waiting for your input.";
+            Message noticeMessage;
+            noticeMessage.chatId = chatId;
+            noticeMessage.senderType = "system";
+            noticeMessage.senderId = "system";
+            noticeMessage.type = "system_event";
+            noticeMessage.content = notice;
+            noticeMessage.createdAt = static_cast<int64_t>(time(nullptr));
+            chatStore_->InsertMessage(noticeMessage);
+            if (!chat.discordChannelId.empty()) {
+                discordBot_->PostPlain(chat.discordChannelId, notice);
+            }
+            break;
+        }
+
+        activityLog_->Log(chatId, agent.id, "turn_start");
+
+        const int64_t maxIdBeforeTurn = chatStore_->LatestMessageId(chatId);
 
         std::string resumeSessionId;
         agentSessionStore_->Get(agent.id, chatId, resumeSessionId);
 
         const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
         const AgentTurnResult turnResult =
-            AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId);
+            AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId, logDir_);
         if (!turnResult.ok) {
             log_(L"Orchestrator: turn failed for agent '" + AsciiToWide(agent.id) + L"': " +
                  AsciiToWide(turnResult.error));
+            activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", false}, {"error", turnResult.error}});
             if (!resumeSessionId.empty()) {
                 // The resume itself may be what failed (stale/missing
                 // session file) — drop it so the next turn starts fresh
@@ -192,6 +257,7 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         if (!turnResult.sdkSessionId.empty()) {
             agentSessionStore_->Set(agent.id, chatId, turnResult.sdkSessionId);
         }
+        activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", true}});
 
         Message reply;
         reply.chatId = chatId;
@@ -202,8 +268,43 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         reply.createdAt = static_cast<int64_t>(time(nullptr));
         chatStore_->InsertMessage(reply);
 
-        if (!chat.discordChannelId.empty()) {
-            PostAsAgent(agent, chat.discordChannelId, turnResult.response);
+        // Everything this turn produced — the primary reply just inserted
+        // above, plus any post_message calls the MCP subprocess made
+        // mid-turn (it only ever writes to the DB; it has no live Discord
+        // connection of its own) — gets mirrored to Discord and scanned for
+        // tags here, on the orchestrator's own thread, in one place.
+        for (const Message& produced : chatStore_->MessagesAfter(chatId, maxIdBeforeTurn)) {
+            // approval_request messages are posted separately by
+            // PostPendingApprovals (with the approve/reject reactions
+            // seeded on them) — mirroring them here first would leave them
+            // with a discord_message_id already set and skip that step.
+            if (produced.type == "approval_request" || produced.senderType != "agent") {
+                continue;
+            }
+
+            Agent producer;
+            if (!agentStore_->Get(produced.senderId, producer)) {
+                continue;
+            }
+
+            if (!chat.discordChannelId.empty() && produced.discordMessageId.empty()) {
+                const std::string discordText = Mentions::ReflectMentionsForDiscord(produced.content, participants);
+                const std::string discordMessageId = PostAsAgent(producer, chat.discordChannelId, discordText);
+                if (!discordMessageId.empty()) {
+                    chatStore_->SetMessageDiscordId(produced.id, discordMessageId);
+                }
+            }
+
+            for (const std::string& targetId : Mentions::ParseMentions(produced.content, participants)) {
+                if (targetId == produced.senderId) {
+                    continue; // no self-trigger
+                }
+                if (!Mentions::IsAllowedToMessage(producer, targetId)) {
+                    activityLog_->Log(chatId, produced.senderId, "mention_blocked", json{{"target", targetId}});
+                    continue;
+                }
+                queue.push_back(targetId);
+            }
         }
     }
 
@@ -212,6 +313,20 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     // live Discord connection) — post any such drafts now that we're back
     // on the orchestrator's own thread with a real DiscordBot.
     PostPendingApprovals();
+}
+
+int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {
+    const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
+    int count = 0;
+    for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
+        if (it->senderType == "user") {
+            break;
+        }
+        if (it->senderType == "agent") {
+            ++count;
+        }
+    }
+    return count;
 }
 
 void Orchestrator::PostPendingApprovals() {

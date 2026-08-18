@@ -6,6 +6,7 @@
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 #include "../third_party/json.hpp"
+#include "../util/ActivityLog.h"
 
 // Everything a tool call needs, bundled up so Tools::Call doesn't grow an
 // ever-longer parameter list as more tools land.
@@ -13,6 +14,7 @@ struct ToolContext {
     ChatStore& chatStore;
     AgentStore& agentStore;
     ApprovalStore& approvalStore;
+    ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default
                           // target for post_message/read_chat/approvals when

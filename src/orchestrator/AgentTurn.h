@@ -30,7 +30,12 @@ public:
     // that Agent SDK session (via its own `resume` option) instead of
     // replaying `recentMessages` as a fresh transcript — see
     // AgentSessionStore. Pass an empty string to always start fresh.
+    //
+    // `logDir`, if non-empty, is forwarded to the spawned MCP subprocess
+    // (via --log-dir) so its own tool-call activity gets logged next to the
+    // orchestrator's — see util/ActivityLog.
     static AgentTurnResult Run(
         const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
-        const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId);
+        const std::string& claudeConfigDir, const std::string& chatId, const std::string& resumeSessionId,
+        const std::wstring& logDir);
 };

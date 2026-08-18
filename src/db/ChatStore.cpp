@@ -246,6 +246,37 @@ bool ChatStore::SetMessageDiscordId(int64_t id, const std::string& discordMessag
     return stmt.Ok();
 }
 
+std::vector<Message> ChatStore::MessagesAfter(const std::string& chatId, int64_t afterId) {
+    std::vector<Message> messages;
+    Statement stmt(
+        db_,
+        "SELECT id, chat_id, sender_type, sender_id, type, content, metadata, discord_message_id, "
+        "created_at FROM messages WHERE chat_id = ?1 AND id > ?2 ORDER BY id ASC;");
+    if (!stmt.Valid()) {
+        return messages;
+    }
+    stmt.BindText(1, chatId);
+    stmt.BindInt64(2, afterId);
+    while (stmt.Step()) {
+        Message m;
+        ReadMessageRow(stmt, m);
+        messages.push_back(std::move(m));
+    }
+    return messages;
+}
+
+int64_t ChatStore::LatestMessageId(const std::string& chatId) {
+    Statement stmt(db_, "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1;");
+    if (!stmt.Valid()) {
+        return 0;
+    }
+    stmt.BindText(1, chatId);
+    if (!stmt.Step()) {
+        return 0;
+    }
+    return stmt.ColumnInt64(0);
+}
+
 bool ChatStore::GetWebhook(
     const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
     std::string& outWebhookToken) {

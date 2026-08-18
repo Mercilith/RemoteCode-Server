@@ -15,6 +15,7 @@
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
 #include "../http/AdminServer.h"
+#include "../util/ActivityLog.h"
 
 using LogFn = std::function<void(const std::wstring&)>;
 
@@ -31,7 +32,17 @@ public:
     void Run(HANDLE shutdownEvent, LogFn log);
 
 private:
+    // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
+    // every active participant agent (the unchanged default for a real
+    // incoming user/Discord message), then for each turn mirrors every
+    // message it produced to Discord and enqueues any agent it @tagged
+    // (subject to can_message + the turn-limit guard) — see Mentions.h and
+    // kMaxAgentChainTurns. Agent-to-agent follow-ups never wait on Discord:
+    // the queue is driven entirely by what's in the DB.
     void HandleIncomingMessage(const std::string& chatId);
+    // Trailing agent-authored messages in `chatId` since the last
+    // user-authored one — the turn-limit guard's counter.
+    int CountTrailingAgentTurns(const std::string& chatId);
     // Posts any newly-created approval drafts (from submit_agent_for_approval)
     // to Discord with the approve/reject reactions seeded on them.
     void PostPendingApprovals();
@@ -53,6 +64,7 @@ private:
 
     LogFn log_;
     std::wstring dbPath_;
+    std::wstring logDir_;
     std::string claudeConfigDir_;
     std::unique_ptr<Database> db_;
     std::unique_ptr<ChatStore> chatStore_;
@@ -61,6 +73,7 @@ private:
     std::unique_ptr<AgentSessionStore> agentSessionStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;
+    std::unique_ptr<ActivityLog> activityLog_;
 
     struct CachedAgentBotClient {
         std::string encryptedToken; // what the client was built from, to detect a reassigned token

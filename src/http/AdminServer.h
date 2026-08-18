@@ -24,7 +24,7 @@ public:
     // same agent, if one exists).
     AdminServer(
         AgentStore& agentStore, AgentSessionStore& agentSessionStore, std::wstring dbPath,
-        std::string claudeConfigDir);
+        std::string claudeConfigDir, std::wstring logDir);
     ~AdminServer();
 
     AdminServer(const AdminServer&) = delete;
@@ -39,6 +39,7 @@ private:
     AgentSessionStore& agentSessionStore_;
     std::wstring dbPath_;
     std::string claudeConfigDir_;
+    std::wstring logDir_;
     std::unique_ptr<httplib::Server> server_;
 };
 

@@ -63,11 +63,12 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json& outBod
 
 AdminServer::AdminServer(
     AgentStore& agentStore, AgentSessionStore& agentSessionStore, std::wstring dbPath,
-    std::string claudeConfigDir)
+    std::string claudeConfigDir, std::wstring logDir)
     : agentStore_(agentStore),
       agentSessionStore_(agentSessionStore),
       dbPath_(std::move(dbPath)),
-      claudeConfigDir_(std::move(claudeConfigDir)) {}
+      claudeConfigDir_(std::move(claudeConfigDir)),
+      logDir_(std::move(logDir)) {}
 
 AdminServer::~AdminServer() = default;
 
@@ -267,7 +268,7 @@ void AdminServer::Run(int port) {
         agentSessionStore_.Get(alex.id, reviseChatId, resumeSessionId);
 
         const AgentTurnResult result = AgentTurn::Run(
-            alex, {contextMessage}, dbPath_, claudeConfigDir_, reviseChatId, resumeSessionId);
+            alex, {contextMessage}, dbPath_, claudeConfigDir_, reviseChatId, resumeSessionId, logDir_);
         if (!result.ok) {
             if (!resumeSessionId.empty()) {
                 agentSessionStore_.Clear(alex.id, reviseChatId);

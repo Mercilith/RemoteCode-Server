@@ -85,6 +85,8 @@ add_executable(RemoteCodeServer
     src/mcp/McpServer.cpp
     src/mcp/Tools.cpp
     src/util/Text.cpp
+    src/util/ActivityLog.cpp
+    src/util/Mentions.cpp
     src/orchestrator/AgentTurn.cpp
     src/orchestrator/Orchestrator.cpp
 )

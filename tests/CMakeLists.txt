@@ -11,6 +11,8 @@ add_executable(RemoteCodeServerTests
     ${CMAKE_SOURCE_DIR}/src/mcp/McpServer.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/Tools.cpp
     ${CMAKE_SOURCE_DIR}/src/util/Text.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/ActivityLog.cpp
+    ${CMAKE_SOURCE_DIR}/src/util/Mentions.cpp
 )
 target_include_directories(RemoteCodeServerTests PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_compile_definitions(RemoteCodeServerTests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)

@@ -203,7 +203,10 @@ json Tools::Definitions() {
             {"name", "post_message"},
             {"description",
              "Post a text message into the current chat as this agent. Pass chat_id only to post "
-             "into a different chat."},
+             "into a different chat. To bring another agent into the conversation, tag them by id "
+             "(e.g. \"@alex\") anywhere in content — only agents you tag get a follow-up turn, and "
+             "only if your can_message permits messaging them; posting with no tags does not "
+             "trigger anyone else."},
             {"inputSchema",
              {
                  {"type", "object"},
@@ -276,18 +279,25 @@ json Tools::Definitions() {
 }
 
 json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& arguments, std::string& outError) {
+    ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_call", json{{"tool", toolName}, {"arguments", arguments}});
+
+    json result;
     if (toolName == "post_message") {
-        return PostMessage(ctx, arguments, outError);
+        result = PostMessage(ctx, arguments, outError);
+    } else if (toolName == "read_chat") {
+        result = ReadChat(ctx, arguments, outError);
+    } else if (toolName == "submit_agent_for_approval") {
+        result = SubmitAgentForApproval(ctx, arguments, outError);
+    } else if (toolName == "update_agent") {
+        result = UpdateAgent(ctx, arguments, outError);
+    } else {
+        outError = "unknown tool: " + toolName;
     }
-    if (toolName == "read_chat") {
-        return ReadChat(ctx, arguments, outError);
+
+    if (!outError.empty()) {
+        ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_error", json{{"tool", toolName}, {"error", outError}});
+    } else {
+        ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_result", json{{"tool", toolName}, {"result", result}});
     }
-    if (toolName == "submit_agent_for_approval") {
-        return SubmitAgentForApproval(ctx, arguments, outError);
-    }
-    if (toolName == "update_agent") {
-        return UpdateAgent(ctx, arguments, outError);
-    }
-    outError = "unknown tool: " + toolName;
-    return {};
+    return result;
 }

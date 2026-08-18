@@ -52,6 +52,15 @@ public:
     bool GetMessageById(int64_t id, Message& outMessage);
     bool GetMessageByDiscordId(const std::string& discordMessageId, Message& outMessage);
     bool SetMessageDiscordId(int64_t id, const std::string& discordMessageId);
+    // Messages with id > afterId, chronological order — used to find every
+    // message a turn produced (the primary reply plus any post_message
+    // tool calls) without needing a live channel back from the MCP
+    // subprocess that wrote them.
+    std::vector<Message> MessagesAfter(const std::string& chatId, int64_t afterId);
+    // Highest message id in the chat, or 0 if it has none yet — the
+    // "before" watermark passed to MessagesAfter to find everything a turn
+    // produced.
+    int64_t LatestMessageId(const std::string& chatId);
 
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,

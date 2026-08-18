@@ -10,6 +10,8 @@
 #include "../src/greeting.h"
 #include "../src/mcp/McpServer.h"
 #include "../src/third_party/json.hpp"
+#include "../src/util/ActivityLog.h"
+#include "../src/util/Mentions.h"
 
 using nlohmann::json;
 
@@ -196,6 +198,7 @@ void TestChatStore() {
     const std::vector<std::string> agentIds = store.ListParticipantAgentIds("chat-1");
     Check(agentIds.size() == 1 && agentIds[0] == "alex", "ChatStore: ListParticipantAgentIds returns just alex");
 
+    std::vector<int64_t> insertedIds;
     for (int i = 0; i < 3; ++i) {
         Message m;
         m.chatId = "chat-1";
@@ -204,7 +207,9 @@ void TestChatStore() {
         m.type = "text";
         m.content = "message " + std::to_string(i);
         m.createdAt = i;
-        Check(store.InsertMessage(m) >= 0, "ChatStore: InsertMessage succeeds for message " + std::to_string(i));
+        const int64_t id = store.InsertMessage(m);
+        Check(id >= 0, "ChatStore: InsertMessage succeeds for message " + std::to_string(i));
+        insertedIds.push_back(id);
     }
 
     const std::vector<Message> recent = store.RecentMessages("chat-1", 10);
@@ -212,6 +217,20 @@ void TestChatStore() {
     Check(
         recent.size() == 3 && recent[0].content == "message 0" && recent[2].content == "message 2",
         "ChatStore: RecentMessages is in chronological (oldest-first) order");
+
+    Check(
+        store.LatestMessageId("chat-1") == insertedIds.back(),
+        "ChatStore: LatestMessageId returns the highest message id");
+    Check(store.LatestMessageId("no-such-chat") == 0, "ChatStore: LatestMessageId is 0 for an empty/unknown chat");
+
+    const std::vector<Message> after = store.MessagesAfter("chat-1", insertedIds[0]);
+    Check(after.size() == 2, "ChatStore: MessagesAfter excludes the watermark id and everything before it");
+    Check(
+        after.size() == 2 && after[0].content == "message 1" && after[1].content == "message 2",
+        "ChatStore: MessagesAfter is in chronological order");
+    Check(
+        store.MessagesAfter("chat-1", insertedIds.back()).empty(),
+        "ChatStore: MessagesAfter is empty once the watermark is the latest id");
 
     Check(store.SetWebhook("chat-1", "alex", "wh-id", "wh-token"), "ChatStore: SetWebhook succeeds");
     std::string webhookId, webhookToken;
@@ -237,7 +256,8 @@ void TestMcpServer() {
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
 
-    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
+    ActivityLog activityLog(L"test-logs", "test-mcp");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
     Check(
@@ -312,7 +332,8 @@ void TestApprovalWorkflowTool() {
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
 
-    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
+    ActivityLog activityLog(L"test-logs", "test-approval");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
 
     const std::string submitCall = json{
         {"jsonrpc", "2.0"},
@@ -380,7 +401,8 @@ void TestUpdateAgentTool() {
     target.updatedAt = 1;
     agentStore.Upsert(target);
 
-    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
+    ActivityLog activityLog(L"test-logs", "test-update");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
 
     const std::string updateCall = json{
         {"jsonrpc", "2.0"},
@@ -414,6 +436,65 @@ void TestUpdateAgentTool() {
     Check(unknownAgentResponse["result"]["isError"] == true, "update_agent rejects an unknown agent id");
 }
 
+void TestMentions() {
+    Agent alex;
+    alex.id = "alex";
+    alex.name = "Alex";
+    alex.canMessageJson = R"(["bot-agent"])";
+
+    Agent botAgent;
+    botAgent.id = "bot-agent";
+    botAgent.name = "Bot Agent"; // Slugify("Bot Agent") == "bot-agent"
+    botAgent.canMessageJson = "[]";
+
+    Agent wildcardAgent;
+    wildcardAgent.id = "wildcard-agent";
+    wildcardAgent.name = "Wildcard Agent";
+    wildcardAgent.canMessageJson = R"(["*"])";
+
+    const std::vector<Agent> candidates = {alex, botAgent, wildcardAgent};
+
+    Check(
+        Mentions::ParseMentions("hey @alex, take a look", candidates) == std::vector<std::string>{"alex"},
+        "Mentions::ParseMentions matches a tag against an agent id");
+    Check(
+        Mentions::ParseMentions("hey @Bot-Agent can you help", candidates) == std::vector<std::string>{"bot-agent"},
+        "Mentions::ParseMentions matches case-insensitively against Slugify(name)");
+    Check(
+        Mentions::ParseMentions("@nobody-real, ping", candidates).empty(),
+        "Mentions::ParseMentions ignores a tag that matches no candidate");
+    Check(
+        Mentions::ParseMentions("@alex @alex @bot-agent", candidates).size() == 2,
+        "Mentions::ParseMentions dedupes repeated tags for the same agent");
+
+    botAgent.discordBotUserId = "999";
+    const std::vector<Agent> withBotId = {alex, botAgent};
+    Check(
+        Mentions::ReflectMentionsForDiscord("cc @bot-agent", withBotId) == "cc <@999>",
+        "Mentions::ReflectMentionsForDiscord uses a real mention for an agent with its own bot");
+    Check(
+        Mentions::ReflectMentionsForDiscord("cc @alex", withBotId) == "cc **@Alex**",
+        "Mentions::ReflectMentionsForDiscord falls back to bold text for a shared-webhook agent");
+    Check(
+        Mentions::ReflectMentionsForDiscord("cc @nobody-real", withBotId) == "cc @nobody-real",
+        "Mentions::ReflectMentionsForDiscord leaves an unresolved tag untouched");
+
+    Check(
+        Mentions::IsAllowedToMessage(alex, "bot-agent"), "Mentions::IsAllowedToMessage allows a listed target");
+    Check(
+        !Mentions::IsAllowedToMessage(alex, "wildcard-agent"),
+        "Mentions::IsAllowedToMessage denies a target not in can_message");
+    Check(
+        Mentions::IsAllowedToMessage(wildcardAgent, "anything-at-all"),
+        "Mentions::IsAllowedToMessage allows any target when can_message contains \"*\"");
+
+    Agent malformed;
+    malformed.canMessageJson = "not json";
+    Check(
+        !Mentions::IsAllowedToMessage(malformed, "bot-agent"),
+        "Mentions::IsAllowedToMessage fails closed on malformed can_message JSON");
+}
+
 } // namespace
 
 int main() {
@@ -426,6 +507,7 @@ int main() {
     TestMcpServer();
     TestApprovalWorkflowTool();
     TestUpdateAgentTool();
+    TestMentions();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;

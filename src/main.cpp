@@ -7,6 +7,7 @@
 #include "db/Schema.h"
 #include "mcp/McpServer.h"
 #include "service/ServiceMain.h"
+#include "util/ActivityLog.h"
 
 namespace {
 
@@ -30,6 +31,7 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     std::wstring agentId;
     std::wstring chatId;
     std::wstring dbPath;
+    std::wstring logDir;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -41,6 +43,8 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
             chatId = argv[++i];
         } else if (arg == L"--db-path" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == L"--log-dir" && i + 1 < argc) {
+            logDir = argv[++i];
         }
     }
 
@@ -56,7 +60,9 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
-    McpServer server(chatStore, agentStore, approvalStore, NarrowAscii(agentId), NarrowAscii(chatId));
+    const std::string narrowAgentId = NarrowAscii(agentId);
+    ActivityLog activityLog(logDir, "mcp-" + narrowAgentId);
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, narrowAgentId, NarrowAscii(chatId));
     server.RunStdio();
     return true;
 }
