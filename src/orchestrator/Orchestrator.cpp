@@ -2,6 +2,7 @@
 
 #include <shlobj.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <ctime>
@@ -195,11 +196,21 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
     }
 
-    // Seed: every active participant runs once, unchanged from before —
-    // this is what makes a real user/Discord message reach everyone in the
-    // chat. Anything queued after this point instead comes from an agent
-    // explicitly @tagging another agent (see below), never from a broadcast.
-    std::deque<std::string> queue(participantIds.begin(), participantIds.end());
+    // Seed: if the triggering (human) message explicitly @tagged one or
+    // more participants, only they run — otherwise fall back to broadcasting
+    // to every participant, same as before tagging existed. Without this,
+    // a message like "@alex ..." would still wake every other agent in the
+    // chat via the broadcast *and* whoever Alex goes on to tag, double-
+    // firing them. Anything queued after this point instead comes from an
+    // agent explicitly @tagging another agent (see below).
+    std::string triggeringContent;
+    const std::vector<Message> latest = chatStore_->RecentMessages(chatId, 1);
+    if (!latest.empty()) {
+        triggeringContent = latest.back().content;
+    }
+    const std::vector<std::string> taggedInTrigger = Mentions::ParseMentions(triggeringContent, participants);
+    const std::vector<std::string>& seedIds = taggedInTrigger.empty() ? participantIds : taggedInTrigger;
+    std::deque<std::string> queue(seedIds.begin(), seedIds.end());
 
     while (!queue.empty()) {
         const std::string agentId = queue.front();
@@ -303,7 +314,14 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
                     activityLog_->Log(chatId, produced.senderId, "mention_blocked", json{{"target", targetId}});
                     continue;
                 }
-                queue.push_back(targetId);
+                // Don't double-queue an agent that's already waiting to run
+                // this pass (e.g. two different messages in the same turn
+                // both tagging the same target) — a *later*, separate
+                // dispatch pass tagging them again is still fine and is
+                // what the turn-limit guard exists for.
+                if (std::find(queue.begin(), queue.end(), targetId) == queue.end()) {
+                    queue.push_back(targetId);
+                }
             }
         }
     }
