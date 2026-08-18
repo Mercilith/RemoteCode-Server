@@ -6,6 +6,7 @@
 #include <windows.h>
 
 #include "../db/AgentStore.h"
+#include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 #include "../db/Database.h"
 #include "../discord/DiscordBot.h"
@@ -26,6 +27,10 @@ public:
 
 private:
     void HandleIncomingMessage(const std::string& chatId);
+    // Posts any newly-created approval drafts (from submit_agent_for_approval)
+    // to Discord with the approve/reject reactions seeded on them.
+    void PostPendingApprovals();
+    void HandleReaction(const std::string& discordMessageId, const std::string& emoji);
 
     LogFn log_;
     std::wstring dbPath_;
@@ -33,5 +38,6 @@ private:
     std::unique_ptr<Database> db_;
     std::unique_ptr<ChatStore> chatStore_;
     std::unique_ptr<AgentStore> agentStore_;
+    std::unique_ptr<ApprovalStore> approvalStore_;
     std::unique_ptr<DiscordBot> discordBot_;
 };

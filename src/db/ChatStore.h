@@ -49,6 +49,9 @@ public:
     // Most recent `limit` messages, oldest first (ready to feed straight
     // into a turn's context).
     std::vector<Message> RecentMessages(const std::string& chatId, int limit);
+    bool GetMessageById(int64_t id, Message& outMessage);
+    bool GetMessageByDiscordId(const std::string& discordMessageId, Message& outMessage);
+    bool SetMessageDiscordId(int64_t id, const std::string& discordMessageId);
 
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,

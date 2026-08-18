@@ -187,6 +187,65 @@ std::vector<Message> ChatStore::RecentMessages(const std::string& chatId, int li
     return messages;
 }
 
+namespace {
+
+void ReadMessageRow(const Statement& stmt, Message& out) {
+    out.id = stmt.ColumnInt64(0);
+    out.chatId = stmt.ColumnText(1);
+    out.senderType = stmt.ColumnText(2);
+    out.senderId = stmt.ColumnText(3);
+    out.type = stmt.ColumnText(4);
+    out.content = stmt.ColumnText(5);
+    out.metadataJson = OrEmpty(stmt, 6);
+    out.discordMessageId = OrEmpty(stmt, 7);
+    out.createdAt = stmt.ColumnInt64(8);
+}
+
+} // namespace
+
+bool ChatStore::GetMessageById(int64_t id, Message& outMessage) {
+    Statement stmt(
+        db_,
+        "SELECT id, chat_id, sender_type, sender_id, type, content, metadata, discord_message_id, "
+        "created_at FROM messages WHERE id = ?1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindInt64(1, id);
+    if (!stmt.Step()) {
+        return false;
+    }
+    ReadMessageRow(stmt, outMessage);
+    return true;
+}
+
+bool ChatStore::GetMessageByDiscordId(const std::string& discordMessageId, Message& outMessage) {
+    Statement stmt(
+        db_,
+        "SELECT id, chat_id, sender_type, sender_id, type, content, metadata, discord_message_id, "
+        "created_at FROM messages WHERE discord_message_id = ?1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, discordMessageId);
+    if (!stmt.Step()) {
+        return false;
+    }
+    ReadMessageRow(stmt, outMessage);
+    return true;
+}
+
+bool ChatStore::SetMessageDiscordId(int64_t id, const std::string& discordMessageId) {
+    Statement stmt(db_, "UPDATE messages SET discord_message_id = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, discordMessageId);
+    stmt.BindInt64(2, id);
+    stmt.Step();
+    return stmt.Ok();
+}
+
 bool ChatStore::GetWebhook(
     const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
     std::string& outWebhookToken) {

@@ -1,5 +1,7 @@
 #include <string>
 
+#include "db/AgentStore.h"
+#include "db/ApprovalStore.h"
 #include "db/ChatStore.h"
 #include "db/Database.h"
 #include "db/Schema.h"
@@ -8,7 +10,7 @@
 
 namespace {
 
-// Agent ids are always ASCII (generated identifiers) — a byte-for-byte
+// Agent/chat ids are always ASCII (generated identifiers) — a byte-for-byte
 // narrow is exact.
 std::string NarrowAscii(const std::wstring& wide) {
     std::string result;
@@ -26,6 +28,7 @@ std::string NarrowAscii(const std::wstring& wide) {
 bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     bool isMcpServer = false;
     std::wstring agentId;
+    std::wstring chatId;
     std::wstring dbPath;
 
     for (int i = 1; i < argc; ++i) {
@@ -34,6 +37,8 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
             isMcpServer = true;
         } else if (arg == L"--agent-id" && i + 1 < argc) {
             agentId = argv[++i];
+        } else if (arg == L"--chat-id" && i + 1 < argc) {
+            chatId = argv[++i];
         } else if (arg == L"--db-path" && i + 1 < argc) {
             dbPath = argv[++i];
         }
@@ -49,7 +54,9 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     }
 
     ChatStore chatStore(db);
-    McpServer server(chatStore, NarrowAscii(agentId));
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    McpServer server(chatStore, agentStore, approvalStore, NarrowAscii(agentId), NarrowAscii(chatId));
     server.RunStdio();
     return true;
 }

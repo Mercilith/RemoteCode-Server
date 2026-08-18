@@ -26,5 +26,5 @@ public:
     // Service runs as SYSTEM, which has no OAuth session of its own.
     static AgentTurnResult Run(
         const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
-        const std::string& claudeConfigDir);
+        const std::string& claudeConfigDir, const std::string& chatId);
 };

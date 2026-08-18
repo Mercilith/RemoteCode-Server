@@ -2,6 +2,7 @@
 #include <string>
 
 #include "../src/db/AgentStore.h"
+#include "../src/db/ApprovalStore.h"
 #include "../src/db/ChatStore.h"
 #include "../src/db/Database.h"
 #include "../src/db/Schema.h"
@@ -136,6 +137,8 @@ void TestMcpServer() {
     db.Open(L":memory:");
     Schema::EnsureCreated(db);
     ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -145,7 +148,7 @@ void TestMcpServer() {
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
 
-    McpServer server(chatStore, "alex");
+    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
     Check(
@@ -158,13 +161,14 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 2, "McpServer: tools/list returns exactly 2 tools");
+    Check(tools.is_array() && tools.size() == 3, "McpServer: tools/list returns exactly 3 tools");
 
+    // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
         {"jsonrpc", "2.0"},
         {"id", 3},
         {"method", "tools/call"},
-        {"params", {{"name", "post_message"}, {"arguments", {{"chat_id", "chat-1"}, {"content", "hi there"}}}}},
+        {"params", {{"name", "post_message"}, {"arguments", {{"content", "hi there"}}}}},
     }.dump();
     const json postResponse = json::parse(server.HandleLine(postCall));
     Check(postResponse["result"]["isError"] == false, "McpServer: post_message call succeeds");
@@ -172,19 +176,19 @@ void TestMcpServer() {
     const std::vector<Message> stored = chatStore.RecentMessages("chat-1", 10);
     Check(
         stored.size() == 1 && stored[0].content == "hi there" && stored[0].senderId == "alex",
-        "McpServer: post_message actually wrote the message as the scoped agent");
+        "McpServer: post_message actually wrote the message as the scoped agent, defaulting chat_id");
 
     const std::string readCall = json{
         {"jsonrpc", "2.0"},
         {"id", 4},
         {"method", "tools/call"},
-        {"params", {{"name", "read_chat"}, {"arguments", {{"chat_id", "chat-1"}}}}},
+        {"params", {{"name", "read_chat"}, {"arguments", json::object()}}},
     }.dump();
     const json readResponse = json::parse(server.HandleLine(readCall));
     const json readResult = json::parse(readResponse["result"]["content"][0]["text"].get<std::string>());
     Check(
         readResult["messages"].size() == 1 && readResult["messages"][0]["content"] == "hi there",
-        "McpServer: read_chat returns the message post_message wrote");
+        "McpServer: read_chat (defaulting chat_id) returns the message post_message wrote");
 
     const std::string unknownToolCall = json{
         {"jsonrpc", "2.0"},
@@ -203,6 +207,69 @@ void TestMcpServer() {
     Check(malformed.contains("error") && malformed["error"]["code"] == -32700, "McpServer: malformed input is a parse error");
 }
 
+void TestApprovalWorkflowTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
+
+    const std::string submitCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "submit_agent_for_approval"},
+          {"arguments",
+           {{"name", "Research Bot"},
+            {"description", "Looks things up."},
+            {"system_prompt", "You are Research Bot."}}}}},
+    }.dump();
+    const json submitResponse = json::parse(server.HandleLine(submitCall));
+    Check(submitResponse["result"]["isError"] == false, "submit_agent_for_approval succeeds");
+    const json submitResult = json::parse(submitResponse["result"]["content"][0]["text"].get<std::string>());
+    Check(
+        submitResult.value("agent_id", "") == "research-bot",
+        "submit_agent_for_approval slugifies the name into an id");
+
+    Agent draft;
+    Check(
+        agentStore.Get("research-bot", draft) && draft.status == "pending_approval",
+        "submit_agent_for_approval writes the agent row as pending_approval");
+
+    const std::vector<Approval> unposted = approvalStore.ListUnposted();
+    Check(unposted.size() == 1, "submit_agent_for_approval leaves exactly one unposted approval");
+    Check(
+        !unposted.empty() && unposted[0].kind == "create_agent" && unposted[0].status == "pending",
+        "the unposted approval is a pending create_agent request");
+
+    // Resolving it (simulating what Orchestrator::HandleReaction does after
+    // a Discord reaction) must remove it from the unposted/pending set.
+    Check(
+        approvalStore.Resolve(unposted[0].id, "approved", 2), "ApprovalStore: Resolve succeeds");
+    Check(
+        approvalStore.ListUnposted().empty(),
+        "a resolved approval no longer shows up as pending/unposted");
+
+    // Submitting the exact same name again must be rejected, not silently
+    // overwrite the (now-resolved) existing agent.
+    const json duplicateResponse = json::parse(server.HandleLine(submitCall));
+    Check(
+        duplicateResponse["result"]["isError"] == true,
+        "submit_agent_for_approval rejects a duplicate agent id");
+}
+
 } // namespace
 
 int main() {
@@ -211,6 +278,7 @@ int main() {
     TestAgentStore();
     TestChatStore();
     TestMcpServer();
+    TestApprovalWorkflowTool();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;

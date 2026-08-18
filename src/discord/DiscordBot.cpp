@@ -18,6 +18,10 @@ void DiscordBot::SetLogHandler(DiscordLogHandler handler) {
     onLog_ = std::move(handler);
 }
 
+void DiscordBot::SetReactionHandler(DiscordReactionHandler handler) {
+    onReaction_ = std::move(handler);
+}
+
 void DiscordBot::Run() {
     bot_ = std::make_unique<dpp::cluster>(token_, dpp::i_default_intents | dpp::i_message_content);
 
@@ -32,6 +36,7 @@ void DiscordBot::Run() {
     });
 
     bot_->on_message_create([this](const dpp::message_create_t& event) { HandleMessageCreate(event); });
+    bot_->on_message_reaction_add([this](const dpp::message_reaction_add_t& event) { HandleReactionAdd(event); });
 
     bot_->start(dpp::st_wait);
 }
@@ -85,6 +90,16 @@ void DiscordBot::HandleMessageCreate(const dpp::message_create_t& event) {
     }
 }
 
+void DiscordBot::HandleReactionAdd(const dpp::message_reaction_add_t& event) {
+    if (event.reacting_user.is_bot()) {
+        // Ignore the reactions we ourselves seed onto approval messages.
+        return;
+    }
+    if (onReaction_) {
+        onReaction_(std::to_string(event.message_id), event.reacting_emoji.name);
+    }
+}
+
 bool DiscordBot::EnsureWebhook(
     const std::string& channelId, const std::string& agentId, const std::string& agentName,
     std::string& outWebhookId, std::string& outWebhookToken) {
@@ -115,12 +130,12 @@ bool DiscordBot::EnsureWebhook(
     return true;
 }
 
-bool DiscordBot::PostAsAgent(
+std::string DiscordBot::PostAsAgent(
     const std::string& channelId, const std::string& agentId, const std::string& agentName,
     const std::string& content) {
     std::string webhookId, webhookToken;
     if (!EnsureWebhook(channelId, agentId, agentName, webhookId, webhookToken) || !bot_) {
-        return false;
+        return "";
     }
 
     dpp::webhook hook;
@@ -132,8 +147,35 @@ bool DiscordBot::PostAsAgent(
 
     std::promise<dpp::confirmation_callback_t> promise;
     std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    // wait=true so the callback carries the posted dpp::message (with its
+    // real id) instead of firing immediately with nothing.
     bot_->execute_webhook(
-        hook, msg, false, 0, "",
+        hook, msg, true, 0, "",
+        [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+    const dpp::confirmation_callback_t result = future.get();
+    if (result.is_error()) {
+        return "";
+    }
+    const dpp::message posted = std::get<dpp::message>(result.value);
+    return std::to_string(posted.id);
+}
+
+void DiscordBot::PostPlain(const std::string& channelId, const std::string& content) {
+    if (!bot_) {
+        return;
+    }
+    bot_->message_create(dpp::message(std::stoull(channelId), content));
+}
+
+bool DiscordBot::AddReaction(
+    const std::string& channelId, const std::string& messageId, const std::string& emoji) {
+    if (!bot_) {
+        return false;
+    }
+    std::promise<dpp::confirmation_callback_t> promise;
+    std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    bot_->message_add_reaction(
+        std::stoull(messageId), std::stoull(channelId), emoji,
         [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
     const dpp::confirmation_callback_t result = future.get();
     return !result.is_error();

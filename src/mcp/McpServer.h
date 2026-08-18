@@ -2,16 +2,20 @@
 
 #include <string>
 
+#include "../db/AgentStore.h"
+#include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 
 // Hand-rolled MCP server (stdio transport, JSON-RPC 2.0, one message per
 // line — https://modelcontextprotocol.io stdio framing). Spawned as the
 // worker's MCP subprocess for a single agent turn, so it's scoped to one
-// agent id and opens its own Database handle onto the same SQLite file the
-// rest of the server uses.
+// agent id and chat id, and opens its own Database handle onto the same
+// SQLite file the rest of the server uses.
 class McpServer {
 public:
-    McpServer(ChatStore& chatStore, std::string agentId);
+    McpServer(
+        ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore, std::string agentId,
+        std::string chatId);
 
     // Processes one JSON-RPC message (a single line, no trailing newline)
     // and returns the response line to write back, or an empty string if
@@ -24,5 +28,8 @@ public:
 
 private:
     ChatStore& chatStore_;
+    AgentStore& agentStore_;
+    ApprovalStore& approvalStore_;
     std::string agentId_;
+    std::string chatId_;
 };
