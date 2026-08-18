@@ -102,7 +102,10 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // Discord is set up, and /revise degrades gracefully (Alex just can't
     // post anywhere, but can still update the agent record).
     adminServer_ = std::make_unique<AdminServer>(
-        *agentStore_, *agentSessionStore_, dbPath_, claudeConfigDir_, logDir_);
+        *agentStore_, *agentSessionStore_, *chatStore_, dbPath_, claudeConfigDir_, logDir_,
+        [this](const std::string& chatId, const std::string& content, const std::string& senderId) {
+            return InjectTestMessage(chatId, content, senderId);
+        });
     std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
     log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
 
@@ -177,6 +180,53 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
 
     adminServer_->Stop();
     adminThread.join();
+}
+
+// DEBUG/DEV-ONLY — see the declaration in Orchestrator.h.
+json Orchestrator::InjectTestMessage(
+    const std::string& chatId, const std::string& content, const std::string& senderId) {
+    if (!discordBot_) {
+        return json{
+            {"error",
+             "Discord is not configured — dispatch requires a live DiscordBot for posting/mirroring"}};
+    }
+
+    Chat chat;
+    if (!chatStore_->GetChat(chatId, chat)) {
+        return json{{"error", "no chat with that id"}};
+    }
+
+    // Watermark taken BEFORE the insert so MessagesAfter below picks up
+    // both the injected message and everything the dispatch produces from
+    // it.
+    const int64_t watermark = chatStore_->LatestMessageId(chatId);
+
+    Message injected;
+    injected.chatId = chatId;
+    injected.senderType = "user";
+    injected.senderId = senderId.empty() ? "debug-user" : senderId;
+    injected.type = "text";
+    injected.content = content;
+    injected.createdAt = static_cast<int64_t>(time(nullptr));
+    if (chatStore_->InsertMessage(injected) < 0) {
+        return json{{"error", "failed to insert the test message"}};
+    }
+
+    // Same dispatch loop a real Discord message would trigger — runs
+    // synchronously on the HTTP handler thread, same as /agents/:id/revise.
+    HandleIncomingMessage(chatId);
+
+    json messages = json::array();
+    for (const Message& m : chatStore_->MessagesAfter(chatId, watermark)) {
+        messages.push_back(json{
+            {"id", m.id},
+            {"sender_type", m.senderType},
+            {"sender_id", m.senderId},
+            {"type", m.type},
+            {"content", m.content},
+        });
+    }
+    return json{{"chat_id", chatId}, {"messages", messages}};
 }
 
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {

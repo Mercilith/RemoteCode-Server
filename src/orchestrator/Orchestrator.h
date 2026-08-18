@@ -15,6 +15,7 @@
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
 #include "../http/AdminServer.h"
+#include "../third_party/json.hpp"
 #include "../util/ActivityLog.h"
 
 using LogFn = std::function<void(const std::wstring&)>;
@@ -30,6 +31,19 @@ public:
     // signaled. If the config is missing/invalid, logs a clear message via
     // `log` and idles on `shutdownEvent` instead of crash-looping.
     void Run(HANDLE shutdownEvent, LogFn log);
+
+    // DEBUG/DEV-ONLY: simulates an incoming human message without a real
+    // Discord round-trip, for local testing/iteration of the message-
+    // dispatch pipeline. Inserts the message, then runs the exact same
+    // dispatch logic (HandleIncomingMessage) a real Discord message would
+    // trigger, and returns a JSON summary of every message the resulting
+    // dispatch produced. Wired up to AdminServer's `/debug/inject-message`
+    // endpoint (loopback-only, no auth — see AdminServer.h). Fails clearly
+    // (does not crash) if Discord isn't configured, since dispatch
+    // unconditionally dereferences discordBot_ (PostAsAgent, EnsureDmChannel,
+    // PostPlain, ...).
+    nlohmann::json InjectTestMessage(
+        const std::string& chatId, const std::string& content, const std::string& senderId);
 
 private:
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
