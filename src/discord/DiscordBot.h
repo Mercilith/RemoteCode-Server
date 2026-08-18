@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "../db/ChatStore.h"
@@ -64,6 +65,14 @@ public:
     // messages.
     bool AddReaction(const std::string& channelId, const std::string& messageId, const std::string& emoji);
 
+    // True if shard 0 hasn't received a heartbeat ACK from Discord in an
+    // unreasonably long time — the local socket can look connected (and
+    // keep sending outbound heartbeats on its own timer) while the remote
+    // end has silently stopped responding, e.g. after a bad resume. This is
+    // the actual "is anything getting through" signal; Orchestrator polls
+    // it and force-reconnects when it goes true.
+    bool IsZombied() const;
+
 private:
     void HandleMessageCreate(const dpp::message_create_t& event);
     void HandleReactionAdd(const dpp::message_reaction_add_t& event);
@@ -76,5 +85,11 @@ private:
     IncomingMessageHandler onIncomingMessage_;
     DiscordLogHandler onLog_;
     DiscordReactionHandler onReaction_;
+    // Guards bot_ against a race between Run() reassigning it (fresh
+    // cluster per (re)connect) and IsZombied() reading it from the
+    // watchdog's own timer thread. Other members' cross-thread use of bot_
+    // (Stop(), PostAsAgent, ...) never overlaps a reassignment by
+    // construction of the surrounding control flow, so isn't covered here.
+    mutable std::mutex botMutex_;
     std::unique_ptr<dpp::cluster> bot_;
 };

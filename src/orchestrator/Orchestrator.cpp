@@ -2,6 +2,8 @@
 
 #include <shlobj.h>
 
+#include <atomic>
+#include <chrono>
 #include <ctime>
 #include <filesystem>
 #include <thread>
@@ -91,14 +93,52 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         std::thread([this, discordMessageId, emoji]() { HandleReaction(discordMessageId, emoji); }).detach();
     });
 
-    log_(L"Orchestrator: connecting to Discord...");
-    std::thread discordThread([this]() { discordBot_->Run(); });
+    // discordBot_->Stop() is the one mechanism used both for a real
+    // shutdown and for a watchdog-triggered reconnect — `stopping` is what
+    // lets the loop below tell the two apart once Run() returns.
+    std::atomic<bool> stopping{false};
+
+    std::thread discordThread([this, &stopping]() {
+        while (!stopping.load()) {
+            log_(L"Orchestrator: connecting to Discord...");
+            discordBot_->Run(); // blocks until Stop() is called
+            if (stopping.load()) {
+                break;
+            }
+            log_(L"Orchestrator: Discord connection ended unexpectedly — reconnecting in 5s...");
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    });
+
+    // Watchdog: DPP can end up in a state where the local socket looks
+    // connected and keeps sending outbound heartbeats on its own timer, but
+    // the remote end has silently stopped responding (observed after a bad
+    // resume) — no crash, no disconnect event, just a connection that never
+    // delivers another message again. Poll for that and force a reconnect
+    // rather than requiring a manual service restart.
+    std::thread watchdogThread([this, &stopping]() {
+        while (!stopping.load()) {
+            for (int i = 0; i < 30 && !stopping.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (stopping.load()) {
+                break;
+            }
+            if (discordBot_->IsZombied()) {
+                log_(L"Orchestrator: Discord connection looks zombied (no heartbeat ACK in a while) — "
+                     L"forcing a reconnect.");
+                discordBot_->Stop();
+            }
+        }
+    });
 
     WaitForSingleObject(shutdownEvent, INFINITE);
 
+    stopping = true;
     log_(L"Orchestrator: shutting down Discord connection...");
     discordBot_->Stop();
     discordThread.join();
+    watchdogThread.join();
 }
 
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {

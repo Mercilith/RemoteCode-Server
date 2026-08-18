@@ -23,7 +23,10 @@ void DiscordBot::SetReactionHandler(DiscordReactionHandler handler) {
 }
 
 void DiscordBot::Run() {
-    bot_ = std::make_unique<dpp::cluster>(token_, dpp::i_default_intents | dpp::i_message_content);
+    {
+        std::lock_guard<std::mutex> lock(botMutex_);
+        bot_ = std::make_unique<dpp::cluster>(token_, dpp::i_default_intents | dpp::i_message_content);
+    }
 
     if (onLog_) {
         bot_->on_log([this](const dpp::log_t& event) { onLog_(event.message); });
@@ -179,4 +182,24 @@ bool DiscordBot::AddReaction(
         [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
     const dpp::confirmation_callback_t result = future.get();
     return !result.is_error();
+}
+
+bool DiscordBot::IsZombied() const {
+    std::lock_guard<std::mutex> lock(botMutex_);
+    if (!bot_) {
+        return false;
+    }
+    const dpp::shard_list shards = bot_->get_shards();
+    const auto it = shards.find(0);
+    if (it == shards.end() || it->second == nullptr) {
+        return false;
+    }
+    const dpp::discord_client* shard = it->second;
+    if (!shard->ready) {
+        return false; // still (re)connecting — not zombied, just not up yet
+    }
+    // Discord's heartbeat interval is well under a minute; missing this long
+    // means several heartbeats in a row went unacknowledged.
+    constexpr time_t kZombieThresholdSeconds = 90;
+    return (time(nullptr) - shard->last_heartbeat_ack) > kZombieThresholdSeconds;
 }
