@@ -19,6 +19,28 @@ namespace {
 
 int failures = 0;
 
+// Seeds an Agent row so Tools::Call's permission enforcement (which looks up
+// ctx.agentId via AgentStore::Get) has something to check against. Tests
+// that exercise tools/call must call this before constructing an McpServer.
+void SeedTestAgent(AgentStore& store, const std::string& agentId, const std::vector<std::string>& tools) {
+    Agent agent;
+    agent.id = agentId;
+    agent.name = agentId;
+    agent.description = "test fixture";
+    agent.systemPrompt = "test";
+    agent.status = "active";
+    json permissions = json::array();
+    for (const std::string& tool : tools) {
+        permissions.push_back(tool);
+    }
+    agent.toolPermissionsJson = permissions.dump();
+    agent.canMessageJson = "[]";
+    agent.createdBy = "user";
+    agent.createdAt = 1;
+    agent.updatedAt = 1;
+    store.Upsert(agent);
+}
+
 void Check(bool condition, const std::string& description) {
     if (!condition) {
         std::cerr << "FAIL: " << description << std::endl;
@@ -284,6 +306,7 @@ void TestMcpServer() {
     chat.discordChannelId = "1";
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
+    SeedTestAgent(agentStore, "alex", {"post_message", "read_chat"});
 
     ActivityLog activityLog(L"test-logs", "test-mcp");
     McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
@@ -299,7 +322,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 5, "McpServer: tools/list returns exactly 5 tools");
+    Check(tools.is_array() && tools.size() == 7, "McpServer: tools/list returns exactly 7 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -360,6 +383,7 @@ void TestApprovalWorkflowTool() {
     chat.discordChannelId = "1";
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
+    SeedTestAgent(agentStore, "alex", {"submit_agent_for_approval"});
 
     ActivityLog activityLog(L"test-logs", "test-approval");
     McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
@@ -424,6 +448,7 @@ void TestMessageUserTool() {
     chat.discordChannelId = "1";
     chat.createdAt = 1;
     chatStore.CreateChat(chat);
+    SeedTestAgent(agentStore, "alex", {"message_user"});
 
     ActivityLog activityLog(L"test-logs", "test-message-user");
     McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
@@ -479,6 +504,7 @@ void TestUpdateAgentTool() {
     target.createdAt = 1;
     target.updatedAt = 1;
     agentStore.Upsert(target);
+    SeedTestAgent(agentStore, "alex", {"update_agent"});
 
     ActivityLog activityLog(L"test-logs", "test-update");
     McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
@@ -513,6 +539,126 @@ void TestUpdateAgentTool() {
     }.dump();
     const json unknownAgentResponse = json::parse(server.HandleLine(unknownAgentCall));
     Check(unknownAgentResponse["result"]["isError"] == true, "update_agent rejects an unknown agent id");
+}
+
+void TestToolPermissionEnforcement() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    // Agent exists but has no tool permissions at all.
+    SeedTestAgent(agentStore, "alex", {});
+
+    ActivityLog activityLog(L"test-logs", "test-permission-denied");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+
+    const std::string postCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"content", "should be blocked"}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(postCall));
+    Check(
+        response["result"]["isError"] == true,
+        "Tools::Call denies a tool not in the agent's tool_permissions");
+
+    const std::vector<Message> messages = chatStore.RecentMessages("chat-1", 10);
+    Check(
+        messages.size() == 1 && messages[0].type == "system_event" &&
+            messages[0].content.find("post_message") != std::string::npos,
+        "Tools::Call logs a system_event message for a denied tool call");
+    Check(
+        chatStore.RecentMessages("chat-1", 10)[0].content.find("without permission") != std::string::npos,
+        "the system_event message explains the call was blocked for lack of permission");
+
+    // Unknown agent id (no row at all) must also fail closed, not crash.
+    ActivityLog activityLog2(L"test-logs", "test-permission-unknown-agent");
+    McpServer serverUnknownAgent(chatStore, agentStore, approvalStore, activityLog2, "nobody", "chat-1");
+    const json unknownAgentResponse = json::parse(serverUnknownAgent.HandleLine(postCall));
+    Check(
+        unknownAgentResponse["result"]["isError"] == true,
+        "Tools::Call fails closed for a tool call from an agent with no AgentStore row");
+}
+
+void TestRememberTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    SeedTestAgent(agentStore, "alex", {"remember"});
+
+    ActivityLog activityLog(L"test-logs", "test-remember");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+
+    const std::string rememberCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "remember"}, {"arguments", {{"key", "favorite_color"}, {"value", "teal"}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(rememberCall));
+    Check(response["result"]["isError"] == false, "remember call succeeds");
+    const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+    Check(result.value("status", "") == "remembered", "remember returns status 'remembered'");
+
+    std::string factValue;
+    Check(
+        agentStore.GetFact("alex", "favorite_color", factValue) && factValue == "teal",
+        "remember actually persists the fact via AgentStore::SetFact");
+}
+
+void TestListAgentsTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    SeedTestAgent(agentStore, "alex", {"list_agents"});
+
+    Agent disabled;
+    disabled.id = "disabled-agent";
+    disabled.name = "Disabled Agent";
+    disabled.description = "should not show up";
+    disabled.systemPrompt = "test";
+    disabled.status = "disabled";
+    disabled.toolPermissionsJson = "[]";
+    disabled.canMessageJson = "[]";
+    disabled.createdBy = "user";
+    disabled.createdAt = 1;
+    disabled.updatedAt = 1;
+    agentStore.Upsert(disabled);
+
+    ActivityLog activityLog(L"test-logs", "test-list-agents");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+
+    const std::string listCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "list_agents"}, {"arguments", json::object()}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(listCall));
+    Check(response["result"]["isError"] == false, "list_agents call succeeds");
+    const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+    Check(result.is_array() && result.size() == 1, "list_agents returns only the active agent");
+    Check(
+        result[0]["id"] == "alex" && result[0]["name"] == "alex" && result[0]["description"] == "test fixture",
+        "list_agents returns id/name/description for the active agent");
 }
 
 void TestMentions() {
@@ -587,6 +733,9 @@ int main() {
     TestApprovalWorkflowTool();
     TestMessageUserTool();
     TestUpdateAgentTool();
+    TestToolPermissionEnforcement();
+    TestRememberTool();
+    TestListAgentsTool();
     TestMentions();
 
     if (failures > 0) {

@@ -27,12 +27,13 @@ constexpr const char* kAlexSystemPrompt =
     "do-everything agents. Once Cardon approves a draft, it becomes a real agent; you can "
     "also propose edits to existing agents the same way. Never mark an agent as active "
     "yourself — every new agent goes through the approval workflow.";
-// Declarative for now — only post_message/read_chat are actually wired up
-// to the MCP server this pass; the rest becomes real once later passes
-// implement them (the MCP server simply won't expose a tool it hasn't
-// implemented yet, regardless of what's listed here).
+// Enforced by Tools::Call (fail-closed) — every tool listed here must
+// actually be implemented in Tools.cpp. start_chat/draft_agent are
+// intentionally left out: they're not implemented yet (start_chat is being
+// built in a parallel branch), and listing an unimplemented tool here would
+// silently permit nothing since Tools::Call would still reject the name.
 constexpr const char* kAlexToolPermissionsJson =
-    R"(["remember","start_chat","post_message","read_chat","list_agents","draft_agent","submit_agent_for_approval","update_agent"])";
+    R"(["post_message","read_chat","message_user","submit_agent_for_approval","update_agent","remember","list_agents"])";
 constexpr const char* kAlexCanMessageJson = R"(["*"])";
 
 } // namespace
