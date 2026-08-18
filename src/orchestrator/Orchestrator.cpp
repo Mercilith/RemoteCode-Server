@@ -249,12 +249,24 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
     }
 
+    // How many agents are actually "in" this conversation right now — the
+    // practical proxy for 1:1 vs. group, since there's always exactly one
+    // human. A disabled/pending participant row doesn't count.
+    int activeParticipantCount = 0;
+    for (const Agent& a : participants) {
+        if (a.status == "active") {
+            ++activeParticipantCount;
+        }
+    }
+
     // Seed: if the triggering (human) message explicitly @tagged one or
-    // more participants, only they run — otherwise fall back to broadcasting
-    // to every participant, same as before tagging existed. Without this,
-    // a message like "@alex ..." would still wake every other agent in the
-    // chat via the broadcast *and* whoever Alex goes on to tag, double-
-    // firing them. Anything queued after this point instead comes from an
+    // more participants, only they run. Otherwise: in a 1:1 chat (exactly
+    // one active agent participant) a message is implicitly addressed to
+    // that agent, same as before tagging existed. In a group chat (2+
+    // active agents), an untagged message has no way to know who it's for
+    // — per spec it's just logged (which already happened before this
+    // function ran), with no auto-response, rather than broadcasting to
+    // everyone. Anything queued after this point instead comes from an
     // agent explicitly @tagging another agent (see below).
     std::string triggeringContent;
     const std::vector<Message> latest = chatStore_->RecentMessages(chatId, 1);
@@ -262,7 +274,13 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         triggeringContent = latest.back().content;
     }
     const std::vector<std::string> taggedInTrigger = Mentions::ParseMentions(triggeringContent, participants);
-    const std::vector<std::string>& seedIds = taggedInTrigger.empty() ? participantIds : taggedInTrigger;
+    std::vector<std::string> seedIds;
+    if (!taggedInTrigger.empty()) {
+        seedIds = taggedInTrigger;
+    } else if (activeParticipantCount <= 1) {
+        seedIds = participantIds;
+    }
+    // else: group chat, no explicit tags — seed nobody.
     std::deque<std::string> queue(seedIds.begin(), seedIds.end());
 
     while (!queue.empty()) {
