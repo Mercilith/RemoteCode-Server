@@ -15,6 +15,12 @@ interface TurnRequest {
   // already scoped to this turn's agent id by the caller.
   mcpServerCommand: string;
   mcpServerArgs: string[];
+  // Path to an already-`claude /login`'d user's Claude Code config
+  // directory (normally %USERPROFILE%\.claude). The orchestrator runs as
+  // a Windows Service under SYSTEM, which has no OAuth session of its own —
+  // this lets the worker borrow a real user's cached session instead of
+  // requiring ANTHROPIC_API_KEY. Empty if not configured.
+  claudeConfigDir: string;
 }
 
 async function readStdin(): Promise<string> {
@@ -32,6 +38,10 @@ async function main(): Promise<void> {
   try {
     const raw = await readStdin();
     const request: TurnRequest = JSON.parse(raw);
+
+    if (request.claudeConfigDir) {
+      process.env.CLAUDE_CONFIG_DIR = request.claudeConfigDir;
+    }
 
     const transcript = request.messages
       .map((m) => `[${m.senderType}:${m.senderId}] ${m.content}`)

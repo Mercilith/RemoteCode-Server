@@ -163,7 +163,8 @@ bool ParseLastJsonLine(const std::string& output, json& outParsed) {
 } // namespace
 
 AgentTurnResult AgentTurn::Run(
-    const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath) {
+    const Agent& agent, const std::vector<Message>& recentMessages, const std::wstring& dbPath,
+    const std::string& claudeConfigDir) {
     AgentTurnResult result;
 
     std::wstring workerDir, tsxCliPath;
@@ -187,6 +188,7 @@ AgentTurnResult AgentTurn::Run(
     request["mcpServerCommand"] = WideToUtf8(ExePath());
     request["mcpServerArgs"] =
         json::array({"--mcp-server", "--agent-id", agent.id, "--db-path", WideToUtf8(dbPath)});
+    request["claudeConfigDir"] = claudeConfigDir;
 
     const std::wstring commandLine = L"node.exe \"" + tsxCliPath + L"\" \"src/index.ts\"";
 

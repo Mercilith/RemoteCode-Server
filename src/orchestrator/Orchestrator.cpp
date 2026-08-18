@@ -67,6 +67,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         WaitForSingleObject(shutdownEvent, INFINITE);
         return;
     }
+    claudeConfigDir_ = config.claudeConfigDir;
 
     discordBot_ = std::make_unique<DiscordBot>(config.discordBotToken, *chatStore_);
     discordBot_->SetLogHandler([this](const std::string& message) { log_(L"Discord: " + AsciiToWide(message)); });
@@ -102,7 +103,7 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
 
         const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
-        const AgentTurnResult turnResult = AgentTurn::Run(agent, recent, dbPath_);
+        const AgentTurnResult turnResult = AgentTurn::Run(agent, recent, dbPath_, claudeConfigDir_);
         if (!turnResult.ok) {
             log_(L"Orchestrator: turn failed for agent '" + AsciiToWide(agent.id) + L"': " +
                  AsciiToWide(turnResult.error));

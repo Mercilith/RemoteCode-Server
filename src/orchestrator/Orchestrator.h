@@ -29,6 +29,7 @@ private:
 
     LogFn log_;
     std::wstring dbPath_;
+    std::string claudeConfigDir_;
     std::unique_ptr<Database> db_;
     std::unique_ptr<ChatStore> chatStore_;
     std::unique_ptr<AgentStore> agentStore_;

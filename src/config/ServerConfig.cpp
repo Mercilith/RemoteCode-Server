@@ -133,6 +133,7 @@ ServerConfig ServerConfigStore::Load() {
     }
 
     config.discordGuildId = parsed.value("discord_guild_id", "");
+    config.claudeConfigDir = parsed.value("claude_config_dir", "");
 
     bool resealNeeded = false;
     if (parsed.contains("discord_bot_token_encrypted")) {
@@ -170,6 +171,7 @@ bool ServerConfigStore::Save(const ServerConfig& config) {
 
     json out;
     out["discord_guild_id"] = config.discordGuildId;
+    out["claude_config_dir"] = config.claudeConfigDir;
 
     if (!config.discordBotToken.empty()) {
         std::vector<BYTE> blob;
