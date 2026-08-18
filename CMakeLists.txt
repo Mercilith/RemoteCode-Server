@@ -55,6 +55,18 @@ else()
     set(DPP_TARGET dpp_imported)
 endif()
 
+# --- cpp-httplib (local admin HTTP API for RemoteCode-Desktop) ---
+# Single header, no build step and no prebuilt-binary fallback problem like
+# DPP had — works identically whether or not a vcpkg toolchain is
+# configured, so RemoteCode-Installer's automated build is unaffected.
+include(FetchContent)
+FetchContent_Declare(
+    cpp_httplib
+    URL "https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.53.1/httplib.h"
+    DOWNLOAD_NO_EXTRACT TRUE
+)
+FetchContent_MakeAvailable(cpp_httplib)
+
 add_executable(RemoteCodeServer
     src/main.cpp
     src/service/ServiceMain.cpp
@@ -65,14 +77,18 @@ add_executable(RemoteCodeServer
     src/db/ChatStore.cpp
     src/db/ApprovalStore.cpp
     src/config/ServerConfig.cpp
+    src/config/Secrets.cpp
     src/discord/DiscordBot.cpp
+    src/discord/AgentBotClient.cpp
+    src/http/AdminServer.cpp
     src/mcp/McpServer.cpp
     src/mcp/Tools.cpp
+    src/util/Text.cpp
     src/orchestrator/AgentTurn.cpp
     src/orchestrator/Orchestrator.cpp
 )
 
-target_include_directories(RemoteCodeServer PRIVATE src)
+target_include_directories(RemoteCodeServer PRIVATE src "${cpp_httplib_SOURCE_DIR}")
 
 target_compile_definitions(RemoteCodeServer PRIVATE
     UNICODE

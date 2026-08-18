@@ -2,14 +2,18 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <windows.h>
 
 #include "../db/AgentStore.h"
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 #include "../db/Database.h"
+#include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
+#include "../http/AdminServer.h"
 
 using LogFn = std::function<void(const std::wstring&)>;
 
@@ -32,6 +36,20 @@ private:
     void PostPendingApprovals();
     void HandleReaction(const std::string& discordMessageId, const std::string& emoji);
 
+    // Posts `content` into `channelId` as `agent` — via `agent`'s own
+    // Discord bot if one is configured, otherwise the shared bot's
+    // per-(channel,agent) webhook. Returns the posted Discord message id,
+    // or an empty string on failure. The one place both reply-posting
+    // (HandleIncomingMessage) and draft-posting (PostPendingApprovals)
+    // funnel through, so they stay consistent as own-bot support was added
+    // after both already existed.
+    std::string PostAsAgent(const Agent& agent, const std::string& channelId, const std::string& content);
+    // Lazily builds (and caches for the process lifetime) the REST-only
+    // bot client for an agent's own token; rebuilt if the stored encrypted
+    // token changes (e.g. reassigned via the admin API). Returns nullptr
+    // if the agent has no own bot configured or the token fails to decrypt.
+    AgentBotClient* GetOrCreateAgentBotClient(const Agent& agent);
+
     LogFn log_;
     std::wstring dbPath_;
     std::string claudeConfigDir_;
@@ -40,4 +58,12 @@ private:
     std::unique_ptr<AgentStore> agentStore_;
     std::unique_ptr<ApprovalStore> approvalStore_;
     std::unique_ptr<DiscordBot> discordBot_;
+    std::unique_ptr<AdminServer> adminServer_;
+
+    struct CachedAgentBotClient {
+        std::string encryptedToken; // what the client was built from, to detect a reassigned token
+        std::unique_ptr<AgentBotClient> client;
+    };
+    std::mutex agentBotClientsMutex_;
+    std::unordered_map<std::string, CachedAgentBotClient> agentBotClients_;
 };

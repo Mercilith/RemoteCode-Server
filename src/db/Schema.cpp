@@ -111,5 +111,34 @@ bool Schema::EnsureCreated(Database& db) {
             return false;
         }
     }
+
+    // Migrations for columns added after the table already existed in the
+    // field — new installs get these via kCreateStatements just fine, but
+    // an already-running database needs them added in place.
+    if (!EnsureColumn(db, "agents", "discord_bot_token_encrypted", "TEXT")) {
+        return false;
+    }
+    if (!EnsureColumn(db, "agents", "discord_bot_user_id", "TEXT")) {
+        return false;
+    }
+    if (!EnsureColumn(db, "agents", "discord_bot_username", "TEXT")) {
+        return false;
+    }
+
     return true;
+}
+
+bool Schema::EnsureColumn(
+    Database& db, const std::string& table, const std::string& column, const std::string& type) {
+    Statement check(db, "PRAGMA table_info(" + table + ");");
+    if (!check.Valid()) {
+        return false;
+    }
+    while (check.Step()) {
+        // table_info's result columns are (cid, name, type, notnull, dflt_value, pk).
+        if (check.ColumnText(1) == column) {
+            return true; // already present
+        }
+    }
+    return db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type + ";");
 }

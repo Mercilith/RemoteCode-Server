@@ -2,6 +2,8 @@
 
 #include <ctime>
 
+#include "../config/Secrets.h"
+
 namespace {
 
 int64_t NowUnix() {
@@ -30,7 +32,7 @@ constexpr const char* kAlexSystemPrompt =
 // implement them (the MCP server simply won't expose a tool it hasn't
 // implemented yet, regardless of what's listed here).
 constexpr const char* kAlexToolPermissionsJson =
-    R"(["remember","start_chat","post_message","read_chat","list_agents","draft_agent","submit_agent_for_approval"])";
+    R"(["remember","start_chat","post_message","read_chat","list_agents","draft_agent","submit_agent_for_approval","update_agent"])";
 constexpr const char* kAlexCanMessageJson = R"(["*"])";
 
 } // namespace
@@ -64,11 +66,32 @@ bool AgentStore::SeedAlexIfEmpty() {
     return Upsert(alex);
 }
 
+namespace {
+
+constexpr const char* kAgentColumns =
+    "id, name, description, system_prompt, status, tool_permissions, can_message, created_by, "
+    "created_at, updated_at, discord_bot_token_encrypted, discord_bot_user_id, discord_bot_username";
+
+void ReadAgentRow(const Statement& stmt, Agent& out) {
+    out.id = stmt.ColumnText(0);
+    out.name = stmt.ColumnText(1);
+    out.description = stmt.ColumnText(2);
+    out.systemPrompt = stmt.ColumnText(3);
+    out.status = stmt.ColumnText(4);
+    out.toolPermissionsJson = stmt.ColumnText(5);
+    out.canMessageJson = stmt.ColumnText(6);
+    out.createdBy = stmt.ColumnText(7);
+    out.createdAt = stmt.ColumnInt64(8);
+    out.updatedAt = stmt.ColumnInt64(9);
+    out.discordBotTokenEncrypted = stmt.ColumnIsNull(10) ? "" : stmt.ColumnText(10);
+    out.discordBotUserId = stmt.ColumnIsNull(11) ? "" : stmt.ColumnText(11);
+    out.discordBotUsername = stmt.ColumnIsNull(12) ? "" : stmt.ColumnText(12);
+}
+
+} // namespace
+
 bool AgentStore::Get(const std::string& id, Agent& outAgent) {
-    Statement stmt(
-        db_,
-        "SELECT id, name, description, system_prompt, status, tool_permissions, can_message, "
-        "created_by, created_at, updated_at FROM agents WHERE id = ?1;");
+    Statement stmt(db_, std::string("SELECT ") + kAgentColumns + " FROM agents WHERE id = ?1;");
     if (!stmt.Valid()) {
         return false;
     }
@@ -76,17 +99,22 @@ bool AgentStore::Get(const std::string& id, Agent& outAgent) {
     if (!stmt.Step()) {
         return false;
     }
-    outAgent.id = stmt.ColumnText(0);
-    outAgent.name = stmt.ColumnText(1);
-    outAgent.description = stmt.ColumnText(2);
-    outAgent.systemPrompt = stmt.ColumnText(3);
-    outAgent.status = stmt.ColumnText(4);
-    outAgent.toolPermissionsJson = stmt.ColumnText(5);
-    outAgent.canMessageJson = stmt.ColumnText(6);
-    outAgent.createdBy = stmt.ColumnText(7);
-    outAgent.createdAt = stmt.ColumnInt64(8);
-    outAgent.updatedAt = stmt.ColumnInt64(9);
+    ReadAgentRow(stmt, outAgent);
     return true;
+}
+
+std::vector<Agent> AgentStore::ListAll() {
+    std::vector<Agent> agents;
+    Statement stmt(db_, std::string("SELECT ") + kAgentColumns + " FROM agents ORDER BY name;");
+    if (!stmt.Valid()) {
+        return agents;
+    }
+    while (stmt.Step()) {
+        Agent agent;
+        ReadAgentRow(stmt, agent);
+        agents.push_back(std::move(agent));
+    }
+    return agents;
 }
 
 bool AgentStore::Upsert(const Agent& agent) {
@@ -111,6 +139,43 @@ bool AgentStore::Upsert(const Agent& agent) {
     stmt.BindText(8, agent.createdBy);
     stmt.BindInt64(9, agent.createdAt);
     stmt.BindInt64(10, agent.updatedAt);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool AgentStore::SetDiscordBotToken(
+    const std::string& agentId, const std::string& plaintextToken, const std::string& botUserId,
+    const std::string& botUsername) {
+    const std::string protectedToken = Secrets::Protect(plaintextToken);
+    if (protectedToken.empty()) {
+        return false;
+    }
+    Statement stmt(
+        db_,
+        "UPDATE agents SET discord_bot_token_encrypted = ?1, discord_bot_user_id = ?2, "
+        "discord_bot_username = ?3, updated_at = ?4 WHERE id = ?5;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, protectedToken);
+    stmt.BindText(2, botUserId);
+    stmt.BindText(3, botUsername);
+    stmt.BindInt64(4, NowUnix());
+    stmt.BindText(5, agentId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool AgentStore::ClearDiscordBotToken(const std::string& agentId) {
+    Statement stmt(
+        db_,
+        "UPDATE agents SET discord_bot_token_encrypted = NULL, discord_bot_user_id = NULL, "
+        "discord_bot_username = NULL, updated_at = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindInt64(1, NowUnix());
+    stmt.BindText(2, agentId);
     stmt.Step();
     return stmt.Ok();
 }

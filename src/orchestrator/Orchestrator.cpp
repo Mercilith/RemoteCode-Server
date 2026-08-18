@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <thread>
 
+#include "../config/Secrets.h"
 #include "../config/ServerConfig.h"
 #include "../db/Schema.h"
 #include "../third_party/json.hpp"
@@ -72,13 +73,24 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     agentStore_->SeedAlexIfEmpty();
 
     const ServerConfig config = ServerConfigStore::Load();
+    claudeConfigDir_ = config.claudeConfigDir;
+
+    // Started regardless of Discord config validity — agent management
+    // (list/create/edit, assigning a bot token) is useful even before
+    // Discord is set up, and /revise degrades gracefully (Alex just can't
+    // post anywhere, but can still update the agent record).
+    adminServer_ = std::make_unique<AdminServer>(*agentStore_, dbPath_, claudeConfigDir_);
+    std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
+    log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
+
     if (!config.valid) {
         log_(L"Orchestrator: no Discord bot token configured (see config/ServerConfig.h for setup "
-             L"instructions) - idling.");
+             L"instructions) - idling (agent management via the admin API still works).");
         WaitForSingleObject(shutdownEvent, INFINITE);
+        adminServer_->Stop();
+        adminThread.join();
         return;
     }
-    claudeConfigDir_ = config.claudeConfigDir;
 
     discordBot_ = std::make_unique<DiscordBot>(config.discordBotToken, *chatStore_);
     discordBot_->SetLogHandler([this](const std::string& message) { log_(L"Discord: " + AsciiToWide(message)); });
@@ -139,6 +151,9 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     discordBot_->Stop();
     discordThread.join();
     watchdogThread.join();
+
+    adminServer_->Stop();
+    adminThread.join();
 }
 
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
@@ -172,7 +187,7 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         chatStore_->InsertMessage(reply);
 
         if (!chat.discordChannelId.empty()) {
-            discordBot_->PostAsAgent(chat.discordChannelId, agent.id, agent.name, turnResult.response);
+            PostAsAgent(agent, chat.discordChannelId, turnResult.response);
         }
     }
 
@@ -195,13 +210,13 @@ void Orchestrator::PostPendingApprovals() {
         }
 
         Agent requester;
-        std::string agentName = approval.requestedBy;
-        if (agentStore_->Get(approval.requestedBy, requester)) {
-            agentName = requester.name;
+        if (!agentStore_->Get(approval.requestedBy, requester)) {
+            requester = Agent{}; // fall back to a minimal stand-in (id-as-name, no own bot)
+            requester.id = approval.requestedBy;
+            requester.name = approval.requestedBy;
         }
 
-        const std::string discordMessageId =
-            discordBot_->PostAsAgent(chat.discordChannelId, approval.requestedBy, agentName, message.content);
+        const std::string discordMessageId = PostAsAgent(requester, chat.discordChannelId, message.content);
         if (discordMessageId.empty()) {
             continue;
         }
@@ -271,4 +286,38 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
         // "said" this, it's a system-level confirmation.
         discordBot_->PostPlain(chat.discordChannelId, confirmationText);
     }
+}
+
+std::string Orchestrator::PostAsAgent(const Agent& agent, const std::string& channelId, const std::string& content) {
+    if (AgentBotClient* ownBot = GetOrCreateAgentBotClient(agent)) {
+        return ownBot->PostAsSelf(channelId, content);
+    }
+    return discordBot_->PostAsAgent(channelId, agent.id, agent.name, content);
+}
+
+AgentBotClient* Orchestrator::GetOrCreateAgentBotClient(const Agent& agent) {
+    if (agent.discordBotTokenEncrypted.empty()) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(agentBotClientsMutex_);
+    auto it = agentBotClients_.find(agent.id);
+    if (it != agentBotClients_.end() && it->second.encryptedToken == agent.discordBotTokenEncrypted) {
+        return it->second.client.get();
+    }
+
+    const std::string token = Secrets::Unprotect(agent.discordBotTokenEncrypted);
+    if (token.empty()) {
+        log_(L"Orchestrator: could not decrypt stored bot token for agent '" + AsciiToWide(agent.id) +
+             L"' — falling back to shared-bot posting.");
+        agentBotClients_.erase(agent.id);
+        return nullptr;
+    }
+
+    CachedAgentBotClient entry;
+    entry.encryptedToken = agent.discordBotTokenEncrypted;
+    entry.client = std::make_unique<AgentBotClient>(token);
+    AgentBotClient* raw = entry.client.get();
+    agentBotClients_[agent.id] = std::move(entry);
+    return raw;
 }

@@ -1,9 +1,9 @@
 #include "Tools.h"
 
-#include <algorithm>
-#include <cctype>
 #include <ctime>
 #include <sstream>
+
+#include "../util/Text.h"
 
 using nlohmann::json;
 
@@ -18,25 +18,6 @@ std::string ResolveChatId(const ToolContext& ctx, const json& arguments) {
         return arguments["chat_id"].get<std::string>();
     }
     return ctx.chatId;
-}
-
-std::string Slugify(const std::string& name) {
-    std::string slug;
-    slug.reserve(name.size());
-    bool lastWasDash = false;
-    for (const char c : name) {
-        if (std::isalnum(static_cast<unsigned char>(c))) {
-            slug.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-            lastWasDash = false;
-        } else if (!lastWasDash && !slug.empty()) {
-            slug.push_back('-');
-            lastWasDash = true;
-        }
-    }
-    while (!slug.empty() && slug.back() == '-') {
-        slug.pop_back();
-    }
-    return slug.empty() ? "agent" : slug;
 }
 
 json PostMessage(ToolContext& ctx, const json& arguments, std::string& outError) {
@@ -163,6 +144,57 @@ json SubmitAgentForApproval(ToolContext& ctx, const json& arguments, std::string
     return json{{"agent_id", agentId}, {"status", "pending_approval"}};
 }
 
+json UpdateAgent(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("agent_id")) {
+        outError = "update_agent requires 'agent_id'";
+        return {};
+    }
+    const std::string agentId = arguments["agent_id"].get<std::string>();
+
+    Agent agent;
+    if (!ctx.agentStore.Get(agentId, agent)) {
+        outError = "no agent with id '" + agentId + "'";
+        return {};
+    }
+
+    bool changed = false;
+    if (arguments.contains("name")) {
+        agent.name = arguments["name"].get<std::string>();
+        changed = true;
+    }
+    if (arguments.contains("description")) {
+        agent.description = arguments["description"].get<std::string>();
+        changed = true;
+    }
+    if (arguments.contains("system_prompt")) {
+        agent.systemPrompt = arguments["system_prompt"].get<std::string>();
+        changed = true;
+    }
+    if (arguments.contains("tool_permissions")) {
+        agent.toolPermissionsJson = arguments["tool_permissions"].dump();
+        changed = true;
+    }
+    if (arguments.contains("can_message")) {
+        agent.canMessageJson = arguments["can_message"].dump();
+        changed = true;
+    }
+
+    if (!changed) {
+        outError = "update_agent requires at least one field to change";
+        return {};
+    }
+
+    agent.updatedAt = static_cast<int64_t>(time(nullptr));
+    // Upsert never touches discord_bot_token*/discord_bot_user_id/
+    // discord_bot_username (see AgentStore.h) — safe to reuse here even
+    // though `agent` was loaded with those fields populated.
+    if (!ctx.agentStore.Upsert(agent)) {
+        outError = "failed to save agent update";
+        return {};
+    }
+    return json{{"agent_id", agent.id}, {"status", agent.status}};
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -219,6 +251,27 @@ json Tools::Definitions() {
                  {"required", json::array({"name", "description", "system_prompt"})},
              }},
         },
+        {
+            {"name", "update_agent"},
+            {"description",
+             "Update an existing agent's name, description, system prompt, tool_permissions, or "
+             "can_message. Only the fields you pass are changed. No approval needed — used both when "
+             "Cardon asks you directly to revise an agent, and in ordinary conversation."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"agent_id", {{"type", "string"}}},
+                      {"name", {{"type", "string"}}},
+                      {"description", {{"type", "string"}}},
+                      {"system_prompt", {{"type", "string"}}},
+                      {"tool_permissions", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"can_message", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                  }},
+                 {"required", json::array({"agent_id"})},
+             }},
+        },
     });
 }
 
@@ -231,6 +284,9 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
     }
     if (toolName == "submit_agent_for_approval") {
         return SubmitAgentForApproval(ctx, arguments, outError);
+    }
+    if (toolName == "update_agent") {
+        return UpdateAgent(ctx, arguments, outError);
     }
     outError = "unknown tool: " + toolName;
     return {};

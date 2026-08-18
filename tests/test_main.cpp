@@ -80,6 +80,62 @@ void TestAgentStore() {
         "AgentStore: GetFact round-trips");
 }
 
+void TestAgentStoreBotToken() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    AgentStore store(db);
+
+    Agent agent;
+    agent.id = "bot-agent";
+    agent.name = "Bot Agent";
+    agent.description = "fixture";
+    agent.systemPrompt = "test";
+    agent.status = "active";
+    agent.toolPermissionsJson = "[]";
+    agent.canMessageJson = "[]";
+    agent.createdBy = "user";
+    agent.createdAt = 1;
+    agent.updatedAt = 1;
+    Check(store.Upsert(agent), "AgentStore: Upsert inserts the fixture agent");
+
+    Agent fresh;
+    Check(
+        store.Get("bot-agent", fresh) && fresh.discordBotTokenEncrypted.empty(),
+        "AgentStore: a new agent has no own bot by default");
+
+    Check(
+        store.SetDiscordBotToken("bot-agent", "fake-token-value", "111", "BotAgentBot"),
+        "AgentStore: SetDiscordBotToken succeeds");
+
+    Agent withBot;
+    Check(store.Get("bot-agent", withBot), "AgentStore: Get after SetDiscordBotToken succeeds");
+    Check(
+        !withBot.discordBotTokenEncrypted.empty() && withBot.discordBotTokenEncrypted != "fake-token-value",
+        "AgentStore: the stored token is encrypted, not plaintext");
+    Check(
+        withBot.discordBotUserId == "111" && withBot.discordBotUsername == "BotAgentBot",
+        "AgentStore: bot identity fields round-trip");
+
+    // Upsert (used for unrelated field edits, e.g. update_agent) must never
+    // touch the bot-token fields.
+    withBot.description = "changed via an unrelated edit";
+    Check(store.Upsert(withBot), "AgentStore: Upsert on an unrelated field succeeds");
+    Agent afterUnrelatedEdit;
+    store.Get("bot-agent", afterUnrelatedEdit);
+    Check(
+        afterUnrelatedEdit.discordBotUsername == "BotAgentBot",
+        "AgentStore: Upsert does not wipe an assigned bot token");
+
+    Check(store.ClearDiscordBotToken("bot-agent"), "AgentStore: ClearDiscordBotToken succeeds");
+    Agent cleared;
+    store.Get("bot-agent", cleared);
+    Check(
+        cleared.discordBotTokenEncrypted.empty() && cleared.discordBotUserId.empty() &&
+            cleared.discordBotUsername.empty(),
+        "AgentStore: ClearDiscordBotToken removes all three fields");
+}
+
 void TestChatStore() {
     Database db;
     db.Open(L":memory:");
@@ -161,7 +217,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 3, "McpServer: tools/list returns exactly 3 tools");
+    Check(tools.is_array() && tools.size() == 4, "McpServer: tools/list returns exactly 4 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -270,15 +326,72 @@ void TestApprovalWorkflowTool() {
         "submit_agent_for_approval rejects a duplicate agent id");
 }
 
+void TestUpdateAgentTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+
+    Agent target;
+    target.id = "target-agent";
+    target.name = "Target Agent";
+    target.description = "before";
+    target.systemPrompt = "before prompt";
+    target.status = "active";
+    target.toolPermissionsJson = "[]";
+    target.canMessageJson = "[]";
+    target.createdBy = "user";
+    target.createdAt = 1;
+    target.updatedAt = 1;
+    agentStore.Upsert(target);
+
+    McpServer server(chatStore, agentStore, approvalStore, "alex", "chat-1");
+
+    const std::string updateCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "update_agent"},
+          {"arguments",
+           {{"agent_id", "target-agent"},
+            {"description", "after"},
+            {"tool_permissions", json::array({"post_message"})}}}}},
+    }.dump();
+    const json updateResponse = json::parse(server.HandleLine(updateCall));
+    Check(updateResponse["result"]["isError"] == false, "update_agent call succeeds");
+
+    Agent updated;
+    Check(agentStore.Get("target-agent", updated), "update_agent: agent still exists afterward");
+    Check(updated.description == "after", "update_agent: description field was applied");
+    Check(updated.systemPrompt == "before prompt", "update_agent: unspecified fields are left alone");
+    Check(
+        json::parse(updated.toolPermissionsJson) == json::array({"post_message"}),
+        "update_agent: tool_permissions field was applied");
+
+    const std::string unknownAgentCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "update_agent"}, {"arguments", {{"agent_id", "no-such-agent"}, {"name", "x"}}}}},
+    }.dump();
+    const json unknownAgentResponse = json::parse(server.HandleLine(unknownAgentCall));
+    Check(unknownAgentResponse["result"]["isError"] == true, "update_agent rejects an unknown agent id");
+}
+
 } // namespace
 
 int main() {
     TestGreeting();
     TestSchema();
     TestAgentStore();
+    TestAgentStoreBotToken();
     TestChatStore();
     TestMcpServer();
     TestApprovalWorkflowTool();
+    TestUpdateAgentTool();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;

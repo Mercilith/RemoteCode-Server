@@ -3,16 +3,13 @@
 #include <windows.h>
 
 #include <shlobj.h>
-#include <wincrypt.h>
 
 #include <filesystem>
 #include <fstream>
 #include <sstream>
-#include <vector>
 
 #include "../third_party/json.hpp"
-
-#pragma comment(lib, "crypt32.lib")
+#include "Secrets.h"
 
 using nlohmann::json;
 namespace fs = std::filesystem;
@@ -31,72 +28,6 @@ std::wstring ConfigDir() {
     std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\ServerData";
     CoTaskMemFree(programData);
     return dir;
-}
-
-bool ProtectString(const std::string& plaintext, std::vector<BYTE>& outBlob) {
-    DATA_BLOB input{};
-    input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(plaintext.data()));
-    input.cbData = static_cast<DWORD>(plaintext.size());
-
-    DATA_BLOB output{};
-    if (!CryptProtectData(
-            &input, L"RemoteCodeServer config secret", nullptr, nullptr, nullptr,
-            CRYPTPROTECT_LOCAL_MACHINE, &output)) {
-        return false;
-    }
-    outBlob.assign(output.pbData, output.pbData + output.cbData);
-    LocalFree(output.pbData);
-    return true;
-}
-
-bool UnprotectString(const std::vector<BYTE>& blob, std::string& outPlaintext) {
-    DATA_BLOB input{};
-    input.pbData = const_cast<BYTE*>(blob.data());
-    input.cbData = static_cast<DWORD>(blob.size());
-
-    DATA_BLOB output{};
-    if (!CryptUnprotectData(
-            &input, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_LOCAL_MACHINE, &output)) {
-        return false;
-    }
-    outPlaintext.assign(reinterpret_cast<char*>(output.pbData), output.cbData);
-    SecureZeroMemory(output.pbData, output.cbData);
-    LocalFree(output.pbData);
-    return true;
-}
-
-std::string Base64Encode(const std::vector<BYTE>& data) {
-    DWORD outLen = 0;
-    CryptBinaryToStringA(
-        data.data(), static_cast<DWORD>(data.size()), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-        nullptr, &outLen);
-    if (outLen == 0) {
-        return "";
-    }
-    std::string result(outLen, '\0');
-    CryptBinaryToStringA(
-        data.data(), static_cast<DWORD>(data.size()), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-        result.data(), &outLen);
-    // The sizing call's outLen includes room for a terminating NUL; this
-    // second call overwrites outLen with the actual character count
-    // written, which does NOT include it — safe to resize to directly.
-    result.resize(outLen);
-    return result;
-}
-
-std::vector<BYTE> Base64Decode(const std::string& text) {
-    DWORD outLen = 0;
-    CryptStringToBinaryA(
-        text.c_str(), static_cast<DWORD>(text.size()), CRYPT_STRING_BASE64, nullptr, &outLen,
-        nullptr, nullptr);
-    if (outLen == 0) {
-        return {};
-    }
-    std::vector<BYTE> result(outLen);
-    CryptStringToBinaryA(
-        text.c_str(), static_cast<DWORD>(text.size()), CRYPT_STRING_BASE64, result.data(), &outLen,
-        nullptr, nullptr);
-    return result;
 }
 
 } // namespace
@@ -137,9 +68,8 @@ ServerConfig ServerConfigStore::Load() {
 
     bool resealNeeded = false;
     if (parsed.contains("discord_bot_token_encrypted")) {
-        const std::vector<BYTE> blob = Base64Decode(parsed["discord_bot_token_encrypted"].get<std::string>());
-        std::string decrypted;
-        if (!blob.empty() && UnprotectString(blob, decrypted)) {
+        const std::string decrypted = Secrets::Unprotect(parsed["discord_bot_token_encrypted"].get<std::string>());
+        if (!decrypted.empty()) {
             config.discordBotToken = decrypted;
         }
     } else if (parsed.contains("discord_bot_token")) {
@@ -174,11 +104,11 @@ bool ServerConfigStore::Save(const ServerConfig& config) {
     out["claude_config_dir"] = config.claudeConfigDir;
 
     if (!config.discordBotToken.empty()) {
-        std::vector<BYTE> blob;
-        if (!ProtectString(config.discordBotToken, blob)) {
+        const std::string protectedToken = Secrets::Protect(config.discordBotToken);
+        if (protectedToken.empty()) {
             return false;
         }
-        out["discord_bot_token_encrypted"] = Base64Encode(blob);
+        out["discord_bot_token_encrypted"] = protectedToken;
     }
 
     const std::wstring path = ConfigFilePath();
