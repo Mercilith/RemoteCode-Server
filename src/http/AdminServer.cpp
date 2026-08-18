@@ -268,7 +268,10 @@ void AdminServer::Run(int port) {
 
         const std::string reviseChatId = "desktop-revise-" + target.id;
         std::string resumeSessionId;
-        agentSessionStore_.Get(alex.id, reviseChatId, resumeSessionId);
+        // Design-spec Section 12, Decision #4: don't resume a session that's
+        // been idle over an hour — start fresh instead.
+        agentSessionStore_.GetIfFresh(
+            alex.id, reviseChatId, kDefaultSessionIdleTimeoutSeconds, resumeSessionId);
 
         // Treated as tagged: Cardon asked Alex directly for this, unlike an
         // ordinary chat turn where a reply may or may not be warranted.

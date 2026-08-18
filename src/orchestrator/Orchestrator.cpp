@@ -89,6 +89,11 @@ constexpr const char* kRejectEmoji = "\xE2\x9D\x8C";  // cross mark
 // against any @tag cycle (A->B->A, fan-out, ...) regardless of its shape.
 constexpr int kMaxAgentChainTurns = 8;
 
+// Design-spec Section 12, Decision #4: a session unused for over an hour
+// is stale — the next turn starts fresh (full context replay) instead of
+// resuming it, rather than resuming indefinitely.
+constexpr int64_t kSessionIdleTimeoutSeconds = 3600;
+
 } // namespace
 
 void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
@@ -355,7 +360,7 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         const int64_t maxIdBeforeTurn = chatStore_->LatestMessageId();
 
         std::string resumeSessionId;
-        agentSessionStore_->Get(agent.id, chatId, resumeSessionId);
+        agentSessionStore_->GetIfFresh(agent.id, chatId, kSessionIdleTimeoutSeconds, resumeSessionId);
 
         const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
         const AgentTurnResult turnResult = AgentTurn::Run(
