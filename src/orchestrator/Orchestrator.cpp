@@ -15,6 +15,7 @@
 #include "../db/Schema.h"
 #include "../third_party/json.hpp"
 #include "../util/Mentions.h"
+#include "../util/Text.h"
 #include "AgentTurn.h"
 
 using nlohmann::json;
@@ -356,11 +357,12 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
                 continue;
             }
 
-            // A DM chat is created without a Discord channel — create one
-            // now, the first time it actually has something to post.
+            // A DM chat (or a start_chat-created group chat) is created
+            // without a Discord channel — create one now, the first time it
+            // actually has something to post.
             std::string discordChannelId = producedChat.discordChannelId;
-            if (discordChannelId.empty() && produced.chatId.rfind("dm-", 0) == 0) {
-                discordChannelId = EnsureDmChannel(agent);
+            if (discordChannelId.empty()) {
+                discordChannelId = EnsureChannelForChat(producedChat);
             }
 
             if (!discordChannelId.empty() && produced.discordMessageId.empty()) {
@@ -418,29 +420,52 @@ int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {
     return count;
 }
 
-std::string Orchestrator::EnsureDmChannel(const Agent& agent) {
-    const std::string dmChatId = "dm-" + agent.id;
-    Chat dmChat;
-    if (!chatStore_->GetChat(dmChatId, dmChat)) {
-        return ""; // message_user creates the chat row; nothing to do if it hasn't yet
-    }
-    if (!dmChat.discordChannelId.empty()) {
-        return dmChat.discordChannelId;
+std::string Orchestrator::EnsureChannelForChat(const Chat& chat) {
+    if (!chat.discordChannelId.empty()) {
+        return chat.discordChannelId;
     }
     if (discordGuildId_.empty() || discordOwnerUserId_.empty()) {
-        log_(L"Orchestrator: agent '" + AsciiToWide(agent.id) + L"' tried to message you directly, but "
+        log_(L"Orchestrator: chat '" + AsciiToWide(chat.id) + L"' needs a private Discord channel, but "
              L"no discord_owner_user_id is configured (see config/ServerConfig.h) — dropping the "
              L"message rather than posting it somewhere unintended.");
         return "";
     }
 
-    const std::string channelId = discordBot_->CreateDmChannel(
-        discordGuildId_, agent.id + "-dm", discordOwnerUserId_, agent.discordBotUserId);
+    const bool isDm = chat.id.rfind("dm-", 0) == 0;
+    std::vector<std::string> extraBotUserIds;
+    std::string channelName;
+
+    if (isDm) {
+        // "dm-<agentId>" is deterministic — the one agent is just the
+        // suffix. Preserve EnsureDmChannel's old behavior exactly: bail out
+        // if that agent isn't known/active.
+        const std::string agentId = chat.id.substr(3);
+        Agent agent;
+        if (!agentStore_->Get(agentId, agent) || agent.status != "active") {
+            return "";
+        }
+        extraBotUserIds.push_back(agent.discordBotUserId);
+        channelName = agentId + "-dm";
+    } else {
+        // Every active agent participant of the chat gets access — their
+        // own bot's id where they have one, else the shared bot's webhook
+        // (already granted unconditionally) covers them.
+        for (const std::string& agentId : chatStore_->ListParticipantAgentIds(chat.id)) {
+            Agent agent;
+            if (agentStore_->Get(agentId, agent) && agent.status == "active") {
+                extraBotUserIds.push_back(agent.discordBotUserId);
+            }
+        }
+        channelName = chat.title.empty() ? chat.id : Slugify(chat.title);
+    }
+
+    const std::string channelId =
+        discordBot_->CreateDmChannel(discordGuildId_, channelName, discordOwnerUserId_, extraBotUserIds);
     if (channelId.empty()) {
-        log_(L"Orchestrator: failed to create a private DM channel for agent '" + AsciiToWide(agent.id) + L"'.");
+        log_(L"Orchestrator: failed to create a private Discord channel for chat '" + AsciiToWide(chat.id) + L"'.");
         return "";
     }
-    chatStore_->SetChatDiscordChannel(dmChatId, channelId);
+    chatStore_->SetChatDiscordChannel(chat.id, channelId);
     return channelId;
 }
 

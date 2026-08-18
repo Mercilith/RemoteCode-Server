@@ -201,7 +201,7 @@ std::string DiscordBot::BotUserId() const {
 
 std::string DiscordBot::CreateDmChannel(
     const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
-    const std::string& extraBotUserId) {
+    const std::vector<std::string>& extraBotUserIds) {
     if (!bot_ || guildId.empty() || humanUserId.empty()) {
         return "";
     }
@@ -223,8 +223,10 @@ std::string DiscordBot::CreateDmChannel(
     if (!ownBotUserId.empty()) {
         c.add_permission_overwrite(std::stoull(ownBotUserId), dpp::ot_member, kUse, 0);
     }
-    if (!extraBotUserId.empty()) {
-        c.add_permission_overwrite(std::stoull(extraBotUserId), dpp::ot_member, kUse, 0);
+    for (const std::string& extraBotUserId : extraBotUserIds) {
+        if (!extraBotUserId.empty()) {
+            c.add_permission_overwrite(std::stoull(extraBotUserId), dpp::ot_member, kUse, 0);
+        }
     }
 
     std::promise<dpp::confirmation_callback_t> promise;

@@ -220,6 +220,14 @@ void TestChatStore() {
     const std::vector<std::string> agentIds = store.ListParticipantAgentIds("chat-1");
     Check(agentIds.size() == 1 && agentIds[0] == "alex", "ChatStore: ListParticipantAgentIds returns just alex");
 
+    const std::vector<Chat> alexChats = store.ListChatsForParticipant("alex");
+    Check(
+        alexChats.size() == 1 && alexChats[0].id == "chat-1",
+        "ChatStore: ListChatsForParticipant returns only chats alex participates in");
+    Check(
+        store.ListChatsForParticipant("nobody").empty(),
+        "ChatStore: ListChatsForParticipant is empty for a non-participant");
+
     std::vector<int64_t> insertedIds;
     for (int i = 0; i < 3; ++i) {
         Message m;
@@ -322,7 +330,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 7, "McpServer: tools/list returns exactly 7 tools");
+    Check(tools.is_array() && tools.size() == 9, "McpServer: tools/list returns exactly 9 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -661,6 +669,166 @@ void TestListAgentsTool() {
         "list_agents returns id/name/description for the active agent");
 }
 
+void TestStartChatAndListMyChatsTools() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+
+    // Seed the calling agent (alex) plus two targets, one alex is allowed to
+    // message and one it isn't — start_chat's can_message check needs real
+    // rows to check against, like TestMessageUserTool notes.
+    Agent alex;
+    alex.id = "alex";
+    alex.name = "Alex";
+    alex.description = "fixture";
+    alex.systemPrompt = "test";
+    alex.status = "active";
+    alex.toolPermissionsJson = R"(["start_chat","list_my_chats"])";
+    alex.canMessageJson = R"(["bravo"])";
+    alex.createdBy = "user";
+    alex.createdAt = 1;
+    alex.updatedAt = 1;
+    agentStore.Upsert(alex);
+
+    Agent bravo;
+    bravo.id = "bravo";
+    bravo.name = "Bravo";
+    bravo.description = "fixture";
+    bravo.systemPrompt = "test";
+    bravo.status = "active";
+    bravo.toolPermissionsJson = "[]";
+    bravo.canMessageJson = "[]";
+    bravo.createdBy = "user";
+    bravo.createdAt = 1;
+    bravo.updatedAt = 1;
+    agentStore.Upsert(bravo);
+
+    Agent charlie; // not in alex's can_message
+    charlie.id = "charlie";
+    charlie.name = "Charlie";
+    charlie.description = "fixture";
+    charlie.systemPrompt = "test";
+    charlie.status = "active";
+    charlie.toolPermissionsJson = "[]";
+    charlie.canMessageJson = "[]";
+    charlie.createdBy = "user";
+    charlie.createdAt = 1;
+    charlie.updatedAt = 1;
+    agentStore.Upsert(charlie);
+
+    Agent disabled; // known but not active
+    disabled.id = "delta";
+    disabled.name = "Delta";
+    disabled.description = "fixture";
+    disabled.systemPrompt = "test";
+    disabled.status = "disabled";
+    disabled.toolPermissionsJson = "[]";
+    disabled.canMessageJson = "[]";
+    disabled.createdBy = "user";
+    disabled.createdAt = 1;
+    disabled.updatedAt = 1;
+    agentStore.Upsert(disabled);
+    // Allow alex to message delta too, so the rejection below is provably
+    // about status, not can_message.
+    alex.canMessageJson = R"(["bravo","charlie","delta"])";
+    agentStore.Upsert(alex);
+    // Re-tighten to the original can_message (excluding charlie) for the
+    // rejection-path test below, then restore before the happy path.
+    Agent alexNoCharlie = alex;
+    alexNoCharlie.canMessageJson = R"(["bravo","delta"])";
+    agentStore.Upsert(alexNoCharlie);
+
+    ActivityLog activityLog(L"test-logs", "test-start-chat");
+    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+
+    // can_message rejection path: charlie isn't in alex's can_message.
+    const std::string rejectedCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "start_chat"},
+          {"arguments",
+           {{"participant_ids", json::array({"bravo", "charlie"})}, {"initial_message", "hi team"}}}}},
+    }.dump();
+    const json rejectedResponse = json::parse(server.HandleLine(rejectedCall));
+    Check(rejectedResponse["result"]["isError"] == true, "start_chat rejects a target outside can_message");
+    Check(
+        chatStore.ListChatsForParticipant("alex").empty(),
+        "start_chat's can_message rejection does not create a chat as a side effect");
+
+    // Inactive-agent rejection path.
+    const std::string inactiveCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "start_chat"},
+          {"arguments", {{"participant_ids", json::array({"delta"})}, {"initial_message", "hi"}}}}},
+    }.dump();
+    const json inactiveResponse = json::parse(server.HandleLine(inactiveCall));
+    Check(inactiveResponse["result"]["isError"] == true, "start_chat rejects a non-active agent");
+
+    // Restore alex's can_message to allow bravo (already does) and try the
+    // happy path.
+    const std::string happyCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "start_chat"},
+          {"arguments",
+           {{"participant_ids", json::array({"bravo"})},
+            {"title", "Project Kickoff"},
+            {"initial_message", "let's get started"}}}}},
+    }.dump();
+    const json happyResponse = json::parse(server.HandleLine(happyCall));
+    Check(happyResponse["result"]["isError"] == false, "start_chat happy path succeeds");
+    const json happyResult = json::parse(happyResponse["result"]["content"][0]["text"].get<std::string>());
+    const std::string newChatId = happyResult.value("chat_id", "");
+    Check(!newChatId.empty(), "start_chat returns a new chat id");
+    Check(newChatId.rfind("dm-", 0) != 0, "start_chat's chat id never collides with the dm- prefix");
+
+    Chat newChat;
+    Check(chatStore.GetChat(newChatId, newChat), "start_chat: the new chat row exists");
+    Check(newChat.discordChannelId.empty(), "start_chat leaves discordChannelId empty for lazy creation");
+
+    Check(
+        chatStore.IsParticipant(newChatId, "agent", "alex") && chatStore.IsParticipant(newChatId, "agent", "bravo"),
+        "start_chat adds both the caller and the validated target as agent participants");
+    Check(
+        !chatStore.IsParticipant(newChatId, "user", "user"),
+        "start_chat does not add an explicit user participant row");
+
+    const std::vector<Message> newChatMessages = chatStore.RecentMessages(newChatId, 10);
+    Check(
+        newChatMessages.size() == 1 && newChatMessages[0].content == "let's get started" &&
+            newChatMessages[0].senderId == "alex",
+        "start_chat inserts the initial message from the calling agent");
+
+    // list_my_chats now reflects the new chat plus the original.
+    const std::string listCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 4},
+        {"method", "tools/call"},
+        {"params", {{"name", "list_my_chats"}, {"arguments", json::object()}}},
+    }.dump();
+    const json listResponse = json::parse(server.HandleLine(listCall));
+    Check(listResponse["result"]["isError"] == false, "list_my_chats call succeeds");
+    const json listResult = json::parse(listResponse["result"]["content"][0]["text"].get<std::string>());
+    bool foundNewChat = false;
+    for (const json& c : listResult["chats"]) {
+        if (c.value("id", "") == newChatId) {
+            foundNewChat = true;
+            Check(c.value("title", "") == "Project Kickoff", "list_my_chats includes the chat's title");
+        }
+    }
+    Check(foundNewChat, "list_my_chats includes the chat start_chat just created");
+}
+
 void TestMentions() {
     Agent alex;
     alex.id = "alex";
@@ -736,6 +904,7 @@ int main() {
     TestToolPermissionEnforcement();
     TestRememberTool();
     TestListAgentsTool();
+    TestStartChatAndListMyChatsTools();
     TestMentions();
 
     if (failures > 0) {

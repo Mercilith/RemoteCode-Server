@@ -33,7 +33,7 @@ constexpr const char* kAlexSystemPrompt =
 // built in a parallel branch), and listing an unimplemented tool here would
 // silently permit nothing since Tools::Call would still reject the name.
 constexpr const char* kAlexToolPermissionsJson =
-    R"(["post_message","read_chat","message_user","submit_agent_for_approval","update_agent","remember","list_agents"])";
+    R"(["post_message","read_chat","message_user","submit_agent_for_approval","update_agent","remember","list_agents","list_my_chats","start_chat"])";
 constexpr const char* kAlexCanMessageJson = R"(["*"])";
 
 } // namespace

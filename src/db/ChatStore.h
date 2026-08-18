@@ -38,9 +38,13 @@ public:
     // `/debug/chats` admin endpoint so a caller can pick a chat_id without
     // querying SQLite directly.
     std::vector<Chat> ListChats();
+    // Every chat `participantId` (an agent id) currently participates in —
+    // joins chats against chat_participants where participant_type='agent'.
+    // Used by the list_my_chats MCP tool.
+    std::vector<Chat> ListChatsForParticipant(const std::string& participantId);
     // Persists a Discord channel id onto a chat that was created without
     // one yet — used once a lazily-created DM channel (see
-    // Orchestrator::EnsureDmChannel) actually exists.
+    // Orchestrator::EnsureChannelForChat) actually exists.
     bool SetChatDiscordChannel(const std::string& chatId, const std::string& discordChannelId);
 
     bool AddParticipant(
