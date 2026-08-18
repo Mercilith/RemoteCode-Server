@@ -1,5 +1,6 @@
 #include "Tools.h"
 
+#include <algorithm>
 #include <ctime>
 #include <sstream>
 
@@ -239,6 +240,36 @@ json UpdateAgent(ToolContext& ctx, const json& arguments, std::string& outError)
     return json{{"agent_id", agent.id}, {"status", agent.status}};
 }
 
+json Remember(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("key") || !arguments.contains("value")) {
+        outError = "remember requires 'key' and 'value'";
+        return {};
+    }
+    const std::string key = arguments["key"].get<std::string>();
+    const std::string value = arguments["value"].get<std::string>();
+    if (!ctx.agentStore.SetFact(ctx.agentId, key, value)) {
+        outError = "failed to remember fact";
+        return {};
+    }
+    return json{{"status", "remembered"}};
+}
+
+json ListAgents(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
+    const std::vector<Agent> agents = ctx.agentStore.ListAll();
+    json out = json::array();
+    for (const Agent& agent : agents) {
+        if (agent.status != "active") {
+            continue;
+        }
+        out.push_back({
+            {"id", agent.id},
+            {"name", agent.name},
+            {"description", agent.description},
+        });
+    }
+    return out;
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -333,11 +364,89 @@ json Tools::Definitions() {
                  {"required", json::array({"agent_id"})},
              }},
         },
+        {
+            {"name", "remember"},
+            {"description",
+             "Store a durable fact about yourself as a key/value pair — persists across turns and "
+             "gets injected into your future turns automatically. Use this for things worth "
+             "remembering long-term (a preference Cardon stated, a decision that was made, context "
+             "you'd otherwise have to re-derive), not for anything transient."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"key", {{"type", "string"}}},
+                      {"value", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"key", "value"})},
+             }},
+        },
+        {
+            {"name", "list_agents"},
+            {"description",
+             "List every currently active agent (id, name, one-line description). Use this to check "
+             "what already exists before proposing a new agent, so you don't create something that "
+             "duplicates or overlaps an existing one."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", json::object()},
+             }},
+        },
     });
 }
 
+namespace {
+
+// Fails closed: inserts a system_event chat message (visible, per the design
+// doc's "log a system_event" requirement) recording the denied call. The
+// JSON activity log's tool_error entry is already written by the caller
+// (ActivityLog wraps every Tools::Call), so this only needs to add the
+// chat-visible record.
+void LogPermissionDenied(ToolContext& ctx, const std::string& toolName) {
+    if (ctx.chatId.empty()) {
+        return;
+    }
+    Message message;
+    message.chatId = ctx.chatId;
+    message.senderType = "system";
+    message.senderId = ctx.agentId;
+    message.type = "system_event";
+    message.content = "Blocked: agent '" + ctx.agentId + "' attempted to call '" + toolName +
+                       "' without permission.";
+    message.createdAt = static_cast<int64_t>(time(nullptr));
+    ctx.chatStore.InsertMessage(message);
+}
+
+} // namespace
+
 json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& arguments, std::string& outError) {
     ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_call", json{{"tool", toolName}, {"arguments", arguments}});
+
+    Agent agent;
+    bool permitted = false;
+    if (!ctx.agentStore.Get(ctx.agentId, agent)) {
+        outError = "unknown agent: " + ctx.agentId;
+    } else {
+        json permissions;
+        try {
+            permissions = json::parse(agent.toolPermissionsJson);
+        } catch (const json::parse_error&) {
+            permissions = json::array();
+        }
+        permitted = permissions.is_array() &&
+                    std::find(permissions.begin(), permissions.end(), toolName) != permissions.end();
+        if (!permitted) {
+            outError = "agent '" + ctx.agentId + "' is not permitted to call tool '" + toolName + "'";
+        }
+    }
+
+    if (!outError.empty()) {
+        LogPermissionDenied(ctx, toolName);
+        ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_error", json{{"tool", toolName}, {"error", outError}});
+        return {};
+    }
 
     json result;
     if (toolName == "post_message") {
@@ -350,6 +459,10 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = SubmitAgentForApproval(ctx, arguments, outError);
     } else if (toolName == "update_agent") {
         result = UpdateAgent(ctx, arguments, outError);
+    } else if (toolName == "remember") {
+        result = Remember(ctx, arguments, outError);
+    } else if (toolName == "list_agents") {
+        result = ListAgents(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }
