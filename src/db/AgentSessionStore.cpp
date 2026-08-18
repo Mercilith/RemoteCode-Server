@@ -18,6 +18,30 @@ bool AgentSessionStore::Get(
     return true;
 }
 
+bool AgentSessionStore::GetIfFresh(
+    const std::string& agentId, const std::string& chatId, int64_t maxAgeSeconds,
+    std::string& outSdkSessionId) {
+    Statement stmt(
+        db_,
+        "SELECT sdk_session_id, last_used_at FROM agent_chat_sessions "
+        "WHERE agent_id = ?1 AND chat_id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, agentId);
+    stmt.BindText(2, chatId);
+    if (!stmt.Step()) {
+        return false;
+    }
+    const int64_t lastUsedAt = stmt.ColumnInt64(1);
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    if (lastUsedAt < now - maxAgeSeconds) {
+        return false;
+    }
+    outSdkSessionId = stmt.ColumnText(0);
+    return true;
+}
+
 bool AgentSessionStore::Set(
     const std::string& agentId, const std::string& chatId, const std::string& sdkSessionId) {
     Statement stmt(

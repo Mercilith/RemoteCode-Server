@@ -1,3 +1,4 @@
+#include <ctime>
 #include <iostream>
 #include <string>
 
@@ -191,6 +192,63 @@ void TestAgentSessionStore() {
     Check(
         !store.Get("alex", "chat-1", sessionId),
         "AgentSessionStore: a cleared session no longer round-trips");
+}
+
+void TestAgentSessionStoreGetIfFresh() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    AgentSessionStore store(db);
+
+    std::string sessionId;
+    Check(
+        !store.GetIfFresh("alex", "chat-1", 3600, sessionId),
+        "AgentSessionStore::GetIfFresh: returns false when no session is stored at all");
+
+    // A session just set (last_used_at == now) is well within any reasonable
+    // maxAgeSeconds window.
+    Check(store.Set("alex", "chat-1", "session-fresh"), "AgentSessionStore::GetIfFresh: Set succeeds");
+    Check(
+        store.GetIfFresh("alex", "chat-1", 3600, sessionId) && sessionId == "session-fresh",
+        "AgentSessionStore::GetIfFresh: a freshly-set session round-trips within the timeout");
+
+    // Insert a row directly with a last_used_at 2 hours in the past, so a
+    // 1-hour maxAgeSeconds treats it as stale.
+    {
+        Statement stmt(
+            db,
+            "INSERT INTO agent_chat_sessions (agent_id, chat_id, sdk_session_id, last_used_at) "
+            "VALUES (?1,?2,?3,?4) ON CONFLICT(agent_id, chat_id) DO UPDATE SET "
+            "sdk_session_id=excluded.sdk_session_id, last_used_at=excluded.last_used_at;");
+        stmt.BindText(1, "alex");
+        stmt.BindText(2, "chat-stale");
+        stmt.BindText(3, "session-old");
+        stmt.BindInt64(4, static_cast<int64_t>(time(nullptr)) - 7200);
+        stmt.Step();
+        Check(stmt.Ok(), "AgentSessionStore::GetIfFresh: fixture insert of a 2-hour-old session succeeds");
+    }
+
+    std::string staleSessionId;
+    Check(
+        !store.GetIfFresh("alex", "chat-stale", 3600, staleSessionId),
+        "AgentSessionStore::GetIfFresh: a session older than maxAgeSeconds is treated as absent");
+    Check(
+        staleSessionId.empty(),
+        "AgentSessionStore::GetIfFresh: outSdkSessionId is left untouched when the session is stale");
+
+    // The same row is still fine under a wider window.
+    std::string wideWindowSessionId;
+    Check(
+        store.GetIfFresh("alex", "chat-stale", 10800, wideWindowSessionId) &&
+            wideWindowSessionId == "session-old",
+        "AgentSessionStore::GetIfFresh: a 2-hour-old session is fresh under a 3-hour window");
+
+    // Get() itself remains unconditional — it should still return the stale
+    // row regardless of age.
+    std::string unconditional;
+    Check(
+        store.Get("alex", "chat-stale", unconditional) && unconditional == "session-old",
+        "AgentSessionStore::GetIfFresh: Get() is unaffected and still returns stale sessions");
 }
 
 void TestChatStore() {
@@ -896,6 +954,7 @@ int main() {
     TestAgentStore();
     TestAgentStoreBotToken();
     TestAgentSessionStore();
+    TestAgentSessionStoreGetIfFresh();
     TestChatStore();
     TestMcpServer();
     TestApprovalWorkflowTool();
