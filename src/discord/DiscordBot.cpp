@@ -28,6 +28,26 @@ void DiscordBot::SetSlashCommandAddRepoHandler(SlashCommandAddRepoHandler handle
     onSlashCommandAddRepo_ = std::move(handler);
 }
 
+void DiscordBot::SetSlashCommandCreateChatHandler(SlashCommandCreateChatHandler handler) {
+    onSlashCommandCreateChat_ = std::move(handler);
+}
+
+void DiscordBot::SetSlashCommandCreateDmHandler(SlashCommandCreateDmHandler handler) {
+    onSlashCommandCreateDm_ = std::move(handler);
+}
+
+void DiscordBot::SetSlashCommandAddAgentHandler(SlashCommandAddAgentHandler handler) {
+    onSlashCommandAddAgent_ = std::move(handler);
+}
+
+void DiscordBot::SetSlashCommandRemoveAgentHandler(SlashCommandRemoveAgentHandler handler) {
+    onSlashCommandRemoveAgent_ = std::move(handler);
+}
+
+void DiscordBot::SetSlashCommandCloseChatHandler(SlashCommandCloseChatHandler handler) {
+    onSlashCommandCloseChat_ = std::move(handler);
+}
+
 void DiscordBot::Run() {
     {
         std::lock_guard<std::mutex> lock(botMutex_);
@@ -54,6 +74,42 @@ void DiscordBot::Run() {
             addRepoCommand.add_option(
                 dpp::command_option(dpp::co_string, "notes", "Optional notes to inject into the onboarding prompt", false));
             bot_->global_command_create(addRepoCommand);
+        }
+        if (onSlashCommandCreateChat_) {
+            dpp::slashcommand createChatCommand(
+                "create-chat", "Start a brand-new group chat with 2+ agents.", bot_->me.id);
+            createChatCommand.add_option(dpp::command_option(
+                dpp::co_string, "agents", "Space or comma separated agent names/ids (2 or more)", true));
+            createChatCommand.add_option(
+                dpp::command_option(dpp::co_string, "title", "Optional chat title", false));
+            bot_->global_command_create(createChatCommand);
+        }
+        if (onSlashCommandCreateDm_) {
+            dpp::slashcommand createDmCommand(
+                "create-dm", "Open (or reuse) your private DM with a single agent.", bot_->me.id);
+            createDmCommand.add_option(
+                dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
+            bot_->global_command_create(createDmCommand);
+        }
+        if (onSlashCommandAddAgent_) {
+            dpp::slashcommand addAgentCommand(
+                "add-agent", "Add an agent to the chat this command is run in.", bot_->me.id);
+            addAgentCommand.add_option(
+                dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
+            bot_->global_command_create(addAgentCommand);
+        }
+        if (onSlashCommandRemoveAgent_) {
+            dpp::slashcommand removeAgentCommand(
+                "remove-agent", "Remove an agent from the chat this command is run in (keeps history).",
+                bot_->me.id);
+            removeAgentCommand.add_option(
+                dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
+            bot_->global_command_create(removeAgentCommand);
+        }
+        if (onSlashCommandCloseChat_) {
+            dpp::slashcommand closeChatCommand(
+                "close-chat", "Archive this chat and delete its Discord channel.", bot_->me.id);
+            bot_->global_command_create(closeChatCommand);
         }
     });
 
@@ -130,32 +186,77 @@ void DiscordBot::HandleReactionAdd(const dpp::message_reaction_add_t& event) {
     }
 }
 
+namespace {
+// get_parameter returns command_value by value — bind it to a named local
+// before taking std::get_if's pointer into it, since a pointer into an
+// unnamed temporary would dangle past the statement (same pattern add-repo's
+// handler already used, factored out now that five more commands need it).
+std::string GetStringParam(const dpp::slashcommand_t& event, const std::string& name) {
+    const dpp::command_value param = event.get_parameter(name);
+    if (const std::string* value = std::get_if<std::string>(&param)) {
+        return *value;
+    }
+    return "";
+}
+} // namespace
+
 void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
-    if (event.command.get_command_name() != "add-repo" || !onSlashCommandAddRepo_) {
+    const std::string name = event.command.get_command_name();
+
+    if (name == "add-repo" && onSlashCommandAddRepo_) {
+        const std::string url = GetStringParam(event, "url");
+        const std::string notes = GetStringParam(event, "notes");
+        // Discord requires an ack within 3 seconds — reply immediately, the
+        // actual clone+onboarding work happens off this thread (see
+        // Orchestrator::Run's wiring of this handler, which hands off to a
+        // detached thread before calling Orchestrator::AddRepo).
+        event.reply("Cloning and setting things up \xE2\x80\x94 I'll update you in the channel once it's ready.");
+        onSlashCommandAddRepo_(url, notes);
         return;
     }
 
-    // get_parameter returns command_value by value — bind it to a named
-    // local before taking std::get_if's pointer into it, since a pointer
-    // into an unnamed temporary would dangle past this statement.
-    std::string url;
-    const dpp::command_value urlParam = event.get_parameter("url");
-    if (const std::string* urlValue = std::get_if<std::string>(&urlParam)) {
-        url = *urlValue;
-    }
-    std::string notes;
-    const dpp::command_value notesParam = event.get_parameter("notes");
-    if (const std::string* notesValue = std::get_if<std::string>(&notesParam)) {
-        notes = *notesValue;
+    if (name == "create-chat" && onSlashCommandCreateChat_) {
+        const std::string agents = GetStringParam(event, "agents");
+        const std::string title = GetStringParam(event, "title");
+        // Pure bookkeeping (DB writes + one channel-create REST call) — see
+        // the comment on SlashCommandCreateChatHandler in DiscordBot.h for
+        // why this replies synchronously with the real result instead of
+        // the ack-now/work-later pattern add-repo uses.
+        event.reply(onSlashCommandCreateChat_(agents, title));
+        return;
     }
 
-    // Discord requires an ack within 3 seconds — reply immediately, the
-    // actual clone+onboarding work happens off this thread (see
-    // Orchestrator::Run's wiring of this handler, which hands off to a
-    // detached thread before calling Orchestrator::AddRepo).
-    event.reply("Cloning and setting things up \xE2\x80\x94 I'll update you in the channel once it's ready.");
+    if (name == "create-dm" && onSlashCommandCreateDm_) {
+        const std::string agent = GetStringParam(event, "agent");
+        event.reply(onSlashCommandCreateDm_(agent));
+        return;
+    }
 
-    onSlashCommandAddRepo_(url, notes);
+    if (name == "add-agent" && onSlashCommandAddAgent_) {
+        const std::string channelId = std::to_string(event.command.channel_id);
+        const std::string agent = GetStringParam(event, "agent");
+        event.reply(onSlashCommandAddAgent_(channelId, agent));
+        return;
+    }
+
+    if (name == "remove-agent" && onSlashCommandRemoveAgent_) {
+        const std::string channelId = std::to_string(event.command.channel_id);
+        const std::string agent = GetStringParam(event, "agent");
+        event.reply(onSlashCommandRemoveAgent_(channelId, agent));
+        return;
+    }
+
+    if (name == "close-chat" && onSlashCommandCloseChat_) {
+        const std::string channelId = std::to_string(event.command.channel_id);
+        // Fire-and-forget, unlike the four handlers above — see
+        // SlashCommandCloseChatHandler's comment in DiscordBot.h: the actual
+        // channel deletion must happen strictly AFTER this ack is sent (you
+        // can't reply into a channel you just deleted), so the real work
+        // can't be "compute the reply text synchronously" here.
+        event.reply("Archiving this chat and deleting the channel...");
+        onSlashCommandCloseChat_(channelId);
+        return;
+    }
 }
 
 bool DiscordBot::EnsureWebhook(
@@ -302,6 +403,33 @@ std::string DiscordBot::CreateDmChannel(
     }
     const dpp::channel created = std::get<dpp::channel>(result.value);
     return std::to_string(created.id);
+}
+
+bool DiscordBot::GrantChannelAccess(const std::string& channelId, const std::string& userId) {
+    if (!bot_ || channelId.empty() || userId.empty()) {
+        return false;
+    }
+    constexpr uint64_t kUse = dpp::p_view_channel | dpp::p_send_messages | dpp::p_read_message_history;
+
+    std::promise<dpp::confirmation_callback_t> promise;
+    std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    bot_->channel_edit_permissions(
+        std::stoull(channelId), std::stoull(userId), kUse, 0, /*member=*/true,
+        [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+    const dpp::confirmation_callback_t result = future.get();
+    return !result.is_error();
+}
+
+bool DiscordBot::DeleteChannel(const std::string& channelId) {
+    if (!bot_ || channelId.empty()) {
+        return false;
+    }
+    std::promise<dpp::confirmation_callback_t> promise;
+    std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    bot_->channel_delete(
+        std::stoull(channelId), [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+    const dpp::confirmation_callback_t result = future.get();
+    return !result.is_error();
 }
 
 bool DiscordBot::IsZombied() const {

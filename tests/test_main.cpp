@@ -428,7 +428,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 11, "McpServer: tools/list returns exactly 11 tools");
+    Check(tools.is_array() && tools.size() == 12, "McpServer: tools/list returns exactly 12 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -1226,6 +1226,173 @@ void TestPromptTemplateMcpTools() {
     Check(updateUnknownResponse["result"]["isError"] == true, "update_prompt_template rejects an unknown name");
 }
 
+void TestChatStoreParticipantModes() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore store(db);
+
+    Chat chat;
+    chat.id = "chat-modes";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.createdAt = 1;
+    Check(store.CreateChat(chat), "ChatStore: CreateChat for participant-mode test");
+
+    Check(store.AddParticipant("chat-modes", "agent", "alex"), "ChatStore: AddParticipant alex");
+    Check(store.AddParticipant("chat-modes", "agent", "bob"), "ChatStore: AddParticipant bob");
+
+    const std::vector<ParticipantAgent> defaults = store.ListParticipantAgents("chat-modes");
+    Check(defaults.size() == 2, "ChatStore: ListParticipantAgents returns both participants");
+    for (const ParticipantAgent& pa : defaults) {
+        Check(
+            pa.mode == ParticipantMode::kAutoRespond,
+            "ChatStore: a newly added participant defaults to auto_respond mode");
+    }
+
+    Check(
+        store.SetParticipantMode("chat-modes", "agent", "bob", ParticipantMode::kListening),
+        "ChatStore: SetParticipantMode succeeds");
+
+    const std::vector<ParticipantAgent> afterSet = store.ListParticipantAgents("chat-modes");
+    bool foundBobListening = false;
+    bool foundAlexAutoRespond = false;
+    for (const ParticipantAgent& pa : afterSet) {
+        if (pa.agentId == "bob") {
+            foundBobListening = pa.mode == ParticipantMode::kListening;
+        }
+        if (pa.agentId == "alex") {
+            foundAlexAutoRespond = pa.mode == ParticipantMode::kAutoRespond;
+        }
+    }
+    Check(foundBobListening, "ChatStore: bob's mode is now listening");
+    Check(foundAlexAutoRespond, "ChatStore: alex is untouched (still auto_respond)");
+
+    // Re-adding an existing participant (INSERT OR IGNORE) must not reset
+    // an already-set mode back to the default.
+    Check(store.AddParticipant("chat-modes", "agent", "bob"), "ChatStore: re-adding bob is a no-op success");
+    const std::vector<ParticipantAgent> afterReAdd = store.ListParticipantAgents("chat-modes");
+    bool stillListening = false;
+    for (const ParticipantAgent& pa : afterReAdd) {
+        if (pa.agentId == "bob") {
+            stillListening = pa.mode == ParticipantMode::kListening;
+        }
+    }
+    Check(stillListening, "ChatStore: re-adding an existing participant does not reset its mode");
+
+    Check(store.RemoveParticipant("chat-modes", "agent", "bob"), "ChatStore: RemoveParticipant succeeds");
+    Check(
+        !store.IsParticipant("chat-modes", "agent", "bob"), "ChatStore: bob is no longer a participant");
+    Check(store.IsParticipant("chat-modes", "agent", "alex"), "ChatStore: alex is still a participant");
+}
+
+void TestChatStoreArchiving() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore store(db);
+
+    Check(store.CreateChat(Chat{"chat-a", "", "user", "active", "", 1}), "ChatStore: create chat-a");
+    Check(store.CreateChat(Chat{"chat-b", "", "user", "active", "", 2}), "ChatStore: create chat-b");
+    store.AddParticipant("chat-a", "agent", "alex");
+    store.AddParticipant("chat-b", "agent", "alex");
+
+    Check(store.SetChatStatus("chat-a", "archived"), "ChatStore: SetChatStatus succeeds");
+    Chat fetched;
+    Check(
+        store.GetChat("chat-a", fetched) && fetched.status == "archived",
+        "ChatStore: SetChatStatus persists the new status");
+
+    const std::vector<Chat> defaultList = store.ListChats();
+    Check(defaultList.size() == 1 && defaultList[0].id == "chat-b", "ChatStore: ListChats excludes archived by default");
+    const std::vector<Chat> allList = store.ListChats(/*includeArchived=*/true);
+    Check(allList.size() == 2, "ChatStore: ListChats(includeArchived=true) returns everything");
+
+    const std::vector<Chat> defaultParticipantList = store.ListChatsForParticipant("alex");
+    Check(
+        defaultParticipantList.size() == 1 && defaultParticipantList[0].id == "chat-b",
+        "ChatStore: ListChatsForParticipant excludes archived by default");
+    const std::vector<Chat> allParticipantList = store.ListChatsForParticipant("alex", /*includeArchived=*/true);
+    Check(
+        allParticipantList.size() == 2,
+        "ChatStore: ListChatsForParticipant(includeArchived=true) returns everything");
+}
+
+void TestRequestAddAgentToChatTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    SeedTestAgent(agentStore, "alex", {"request_add_agent_to_chat"});
+    // Give alex permission to message bob (can_message defaults to [] in
+    // SeedTestAgent, which would fail-closed IsAllowedToMessage below).
+    Agent alex;
+    agentStore.Get("alex", alex);
+    alex.canMessageJson = json::array({"*"}).dump();
+    agentStore.Upsert(alex);
+    chatStore.AddParticipant("chat-1", "agent", "alex");
+
+    SeedTestAgent(agentStore, "bob", {});
+
+    ActivityLog activityLog(L"test-logs", "test-request-add-agent");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+
+    const std::string requestCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "request_add_agent_to_chat"},
+          {"arguments", {{"target_agent_id", "bob"}, {"reason", "needs bob's expertise"}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(requestCall));
+    Check(response["result"]["isError"] == false, "request_add_agent_to_chat succeeds");
+
+    const std::vector<Approval> unposted = approvalStore.ListUnposted();
+    Check(unposted.size() == 1, "request_add_agent_to_chat leaves exactly one unposted approval");
+    Check(
+        !unposted.empty() && unposted[0].kind == "add_agent_to_chat" && unposted[0].status == "pending",
+        "the unposted approval is a pending add_agent_to_chat request");
+
+    Check(
+        !chatStore.IsParticipant("chat-1", "agent", "bob"),
+        "bob is not yet a participant before the approval is resolved");
+
+    // Requesting the same agent again (still pending) is rejected outright
+    // since bob isn't a participant yet, but a request for an agent already
+    // IN the chat must be rejected regardless of approval state.
+    const std::string requestAlexCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "request_add_agent_to_chat"},
+          {"arguments", {{"target_agent_id", "alex"}, {"reason", "n/a"}}}}},
+    }.dump();
+    const json alexResponse = json::parse(server.HandleLine(requestAlexCall));
+    Check(
+        alexResponse["result"]["isError"] == true,
+        "request_add_agent_to_chat rejects a target already in the chat");
+
+    // Simulates what Orchestrator::HandleReaction does once Cardon approves.
+    Check(
+        approvalStore.Resolve(unposted[0].id, "approved", 2), "ApprovalStore: Resolve(approved) succeeds");
+    chatStore.AddParticipant("chat-1", "agent", "bob");
+    Check(chatStore.IsParticipant("chat-1", "agent", "bob"), "bob is a participant after the approval resolves");
+}
+
 } // namespace
 
 int main() {
@@ -1237,6 +1404,8 @@ int main() {
     TestAgentSessionStoreGetIfFresh();
     TestChatSummaryStore();
     TestChatStore();
+    TestChatStoreParticipantModes();
+    TestChatStoreArchiving();
     TestMcpServer();
     TestApprovalWorkflowTool();
     TestMessageUserTool();
@@ -1245,6 +1414,7 @@ int main() {
     TestRememberTool();
     TestListAgentsTool();
     TestStartChatAndListMyChatsTools();
+    TestRequestAddAgentToChatTool();
     TestMentions();
     TestChunkForDiscord();
     TestGitHubRepoParseGitHubUrl();

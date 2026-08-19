@@ -117,6 +117,30 @@ std::wstring RepoLocalPath(const std::string& repoId) {
     return dir;
 }
 
+// Splits a slash command's free-text "agents" option (space and/or comma
+// separated) into individual name/id tokens — dpp has no good multi-select
+// option type, so /create-chat takes one string option and this is how it's
+// broken apart before each token is resolved via
+// Orchestrator::ResolveActiveAgentByNameOrId.
+std::vector<std::string> SplitAgentTokens(const std::string& raw) {
+    std::vector<std::string> tokens;
+    std::string current;
+    for (char c : raw) {
+        if (c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r') {
+            if (!current.empty()) {
+                tokens.push_back(current);
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        tokens.push_back(current);
+    }
+    return tokens;
+}
+
 // Discord's actual UTF-8 bytes for the two reaction emoji this pass's
 // approval workflow understands.
 constexpr const char* kApproveEmoji = "\xE2\x9C\x85"; // check mark
@@ -236,6 +260,26 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
             std::string error;
             AddRepo(url, notes, error);
         }).detach();
+    });
+    discordBot_->SetSlashCommandCreateChatHandler([this](const std::string& agentsRaw, const std::string& title) {
+        return HandleSlashCommandCreateChat(agentsRaw, title);
+    });
+    discordBot_->SetSlashCommandCreateDmHandler(
+        [this](const std::string& agentRaw) { return HandleSlashCommandCreateDm(agentRaw); });
+    discordBot_->SetSlashCommandAddAgentHandler(
+        [this](const std::string& channelId, const std::string& agentRaw) {
+            return HandleSlashCommandAddAgent(channelId, agentRaw);
+        });
+    discordBot_->SetSlashCommandRemoveAgentHandler(
+        [this](const std::string& channelId, const std::string& agentRaw) {
+            return HandleSlashCommandRemoveAgent(channelId, agentRaw);
+        });
+    discordBot_->SetSlashCommandCloseChatHandler([this](const std::string& channelId) {
+        // Detached, same as add-repo's handler above — DeleteChannel is a
+        // blocking REST call (see DiscordBot::DeleteChannel), no need to
+        // hold the gateway thread for it since the interaction's ack
+        // already happened before this callback fires.
+        std::thread([this, channelId]() { HandleSlashCommandCloseChat(channelId); }).detach();
     });
 
     // discordBot_->Stop() is the one mechanism used both for a real
@@ -472,7 +516,22 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         return;
     }
 
-    const std::vector<std::string> participantIds = chatStore_->ListParticipantAgentIds(chatId);
+    const std::vector<ParticipantAgent> participantAgents = chatStore_->ListParticipantAgents(chatId);
+    std::vector<std::string> participantIds;
+    // agentId -> mode ("auto_respond" | "listening") — consulted below so a
+    // 'listening' participant only gets queued for a turn when explicitly
+    // @-tagged, never on every message. It still has full context whenever
+    // it does take a turn, since the message that triggered dispatch (and
+    // everything else) was already written to `messages` before this runs —
+    // "listening" only affects whether a turn gets queued, not what's in the
+    // chat history a queued turn reads.
+    std::unordered_map<std::string, std::string> participantModes;
+    participantIds.reserve(participantAgents.size());
+    for (const ParticipantAgent& pa : participantAgents) {
+        participantIds.push_back(pa.agentId);
+        participantModes[pa.agentId] = pa.mode;
+    }
+
     // Every tag ("@agentB") is resolved against this — the full participant
     // roster, not just whoever's currently queued — so an agent can address
     // any teammate in the chat, active or not (inactive/unknown ones just
@@ -485,10 +544,12 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
     }
 
-    // Every active agent in the chat takes every message into context —
-    // dispatched a turn on every message, tagged or not (this is what keeps
-    // a resumed SDK session's view of the conversation gapless). `tagged`
-    // just tells that turn whether it's expected to reply (see the
+    // Every active 'auto_respond' agent in the chat takes every message into
+    // context — dispatched a turn on every message, tagged or not (this is
+    // what keeps a resumed SDK session's view of the conversation gapless).
+    // 'listening' agents are the exception: they're never queued unless
+    // explicitly @-tagged (see participantModes above). `tagged` itself just
+    // tells a queued turn whether it's expected to reply (see the
     // addressingNote worker/src/index.ts builds into the prompt) or free to
     // stay silent — an empty response below is simply not posted, not an
     // error. The turn-limit guard is what keeps this from spiraling if
@@ -498,7 +559,12 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         bool tagged;
     };
     std::deque<QueueEntry> queue;
-    auto enqueue = [&queue](const std::string& id, bool tagged) {
+    auto enqueue = [&queue, &participantModes](const std::string& id, bool tagged) {
+        const auto modeIt = participantModes.find(id);
+        const bool listening = modeIt != participantModes.end() && modeIt->second == ParticipantMode::kListening;
+        if (listening && !tagged) {
+            return; // listening-mode agents only get a turn when explicitly @-tagged
+        }
         for (QueueEntry& entry : queue) {
             if (entry.agentId == id) {
                 entry.tagged = entry.tagged || tagged; // never downgrade an already-tagged entry
@@ -875,8 +941,68 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
     const std::string newStatus = isApprove ? "approved" : "rejected";
     approvalStore_->Resolve(approval.id, newStatus, static_cast<int64_t>(time(nullptr)));
 
+    if (approval.kind == "add_agent_to_chat") {
+        json payload;
+        try {
+            payload = json::parse(approval.payloadJson);
+        } catch (const json::parse_error&) {
+            return;
+        }
+        const std::string targetChatId = payload.value("chat_id", "");
+        const std::string targetAgentId = payload.value("target_agent_id", "");
+
+        Agent targetAgent;
+        if (targetChatId.empty() || targetAgentId.empty() || !agentStore_->Get(targetAgentId, targetAgent)) {
+            return;
+        }
+
+        std::string confirmationText;
+        if (isApprove) {
+            // The whole of "converting a DM to a multi-agent chat": add the
+            // second agent as an ordinary chat_participants row. Chat
+            // membership already lives entirely in chat_participants (see
+            // ChatStore::ListParticipantAgentIds/ListParticipantAgents) —
+            // nothing else in the system treats a "dm-<agentId>" chat id as
+            // structurally different from any other chat id, it's purely a
+            // naming convention message_user/EnsureChannelForChat use to
+            // find/create the single-agent case. So a dm- chat that grows a
+            // second agent participant simply becomes a normal multi-agent
+            // group chat under its original (still dm-prefixed) id — no id
+            // change, no migration, no special-casing needed anywhere else
+            // in the dispatch/broadcast logic.
+            chatStore_->AddParticipant(targetChatId, "agent", targetAgentId);
+            confirmationText = "Agent '" + targetAgent.name + "' was added to the chat.";
+        } else {
+            confirmationText = "Request to add '" + targetAgent.name + "' to the chat was rejected.";
+        }
+
+        Message reply;
+        reply.chatId = message.chatId;
+        reply.senderType = "system";
+        reply.senderId = "system";
+        reply.type = "system_event";
+        reply.content = confirmationText;
+        reply.createdAt = static_cast<int64_t>(time(nullptr));
+        chatStore_->InsertMessage(reply);
+
+        Chat targetChat;
+        if (chatStore_->GetChat(targetChatId, targetChat) && !targetChat.discordChannelId.empty()) {
+            discordBot_->PostPlain(targetChat.discordChannelId, confirmationText);
+            // The channel already exists (created before this agent joined)
+            // — if the newly-added agent has its own Discord bot, it needs
+            // an explicit permission overwrite to actually see a channel it
+            // wasn't originally granted access to at creation time (see
+            // CreateDmChannel). Shared-webhook agents need nothing extra —
+            // they have no separate Discord account to grant.
+            if (isApprove && !targetAgent.discordBotUserId.empty()) {
+                discordBot_->GrantChannelAccess(targetChat.discordChannelId, targetAgent.discordBotUserId);
+            }
+        }
+        return;
+    }
+
     if (approval.kind != "create_agent") {
-        return; // no other approval kinds exist yet
+        return; // no other approval kinds exist
     }
 
     json payload;
@@ -1002,4 +1128,192 @@ AgentBotClient* Orchestrator::GetOrCreateAgentBotClient(const Agent& agent) {
     AgentBotClient* raw = entry.client.get();
     agentBotClients_[agent.id] = std::move(entry);
     return raw;
+}
+
+bool Orchestrator::ResolveActiveAgentByNameOrId(const std::string& token, Agent& outAgent) {
+    std::string lowerToken = token;
+    for (char& c : lowerToken) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (const Agent& candidate : agentStore_->ListAll()) {
+        if (candidate.status != "active") {
+            continue;
+        }
+        std::string lowerId = candidate.id;
+        for (char& c : lowerId) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lowerId == lowerToken) {
+            outAgent = candidate;
+            return true;
+        }
+        std::string lowerSlug = Slugify(candidate.name);
+        for (char& c : lowerSlug) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lowerSlug == lowerToken) {
+            outAgent = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string Orchestrator::HandleSlashCommandCreateChat(const std::string& agentsRaw, const std::string& title) {
+    const std::vector<std::string> tokens = SplitAgentTokens(agentsRaw);
+    std::vector<Agent> resolved;
+    std::vector<std::string> unresolvedTokens;
+    for (const std::string& token : tokens) {
+        Agent agent;
+        if (ResolveActiveAgentByNameOrId(token, agent)) {
+            const bool alreadyResolved =
+                std::find_if(resolved.begin(), resolved.end(), [&](const Agent& a) { return a.id == agent.id; }) !=
+                resolved.end();
+            if (!alreadyResolved) {
+                resolved.push_back(agent);
+            }
+        } else {
+            unresolvedTokens.push_back(token);
+        }
+    }
+
+    if (!unresolvedTokens.empty()) {
+        std::string joined;
+        for (size_t i = 0; i < unresolvedTokens.size(); ++i) {
+            if (i > 0) {
+                joined += ", ";
+            }
+            joined += unresolvedTokens[i];
+        }
+        return "Couldn't resolve these to known, active agents: " + joined;
+    }
+    if (resolved.size() < 2) {
+        return "/create-chat needs 2 or more agents (space or comma separated names/ids).";
+    }
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    const std::string chatId = "agentchat-" + Slugify(title.empty() ? "chat" : title) + "-" + std::to_string(now);
+
+    Chat chat;
+    chat.id = chatId;
+    chat.title = title;
+    chat.createdBy = "user";
+    chat.status = "active";
+    // discordChannelId left empty on purpose — created below via
+    // EnsureChannelForChat, the same lazy-creation path every other chat
+    // uses, once every participant is already added (so the channel gets
+    // created with everyone's permission overwrites in one shot).
+    chat.createdAt = now;
+    if (!chatStore_->CreateChat(chat)) {
+        return "Failed to create the chat (internal error).";
+    }
+    for (const Agent& agent : resolved) {
+        chatStore_->AddParticipant(chatId, "agent", agent.id);
+    }
+
+    const std::string channelId = EnsureChannelForChat(chat);
+    if (channelId.empty()) {
+        return "Chat '" + chatId +
+               "' was created, but its Discord channel could not be — check discord_owner_user_id/"
+               "discord_guild_id configuration.";
+    }
+
+    std::string names;
+    for (size_t i = 0; i < resolved.size(); ++i) {
+        if (i > 0) {
+            names += ", ";
+        }
+        names += resolved[i].name;
+    }
+    return "Created a new chat with " + names + ": <#" + channelId + ">";
+}
+
+std::string Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw) {
+    Agent agent;
+    if (!ResolveActiveAgentByNameOrId(agentRaw, agent)) {
+        return "'" + agentRaw + "' is not a known, active agent.";
+    }
+
+    // "dm-<agentId>" — must match mcp/Tools.cpp's MessageUser exactly, so a
+    // DM opened here and one an agent opens itself via message_user are
+    // always the same chat, never duplicated.
+    const std::string dmChatId = "dm-" + agent.id;
+    Chat dmChat;
+    if (!chatStore_->GetChat(dmChatId, dmChat)) {
+        dmChat.id = dmChatId;
+        dmChat.title = agent.id + " (DM)";
+        dmChat.createdBy = "user";
+        dmChat.status = "active";
+        dmChat.createdAt = static_cast<int64_t>(time(nullptr));
+        if (!chatStore_->CreateChat(dmChat)) {
+            return "Failed to create the DM chat (internal error).";
+        }
+    }
+    chatStore_->AddParticipant(dmChatId, "agent", agent.id);
+
+    const std::string channelId = EnsureChannelForChat(dmChat);
+    if (channelId.empty()) {
+        return "DM chat with '" + agent.name +
+               "' exists, but its Discord channel could not be created — check "
+               "discord_owner_user_id/discord_guild_id configuration.";
+    }
+    return "Your DM with " + agent.name + ": <#" + channelId + ">";
+}
+
+std::string Orchestrator::HandleSlashCommandAddAgent(const std::string& channelId, const std::string& agentRaw) {
+    Chat chat;
+    if (!chatStore_->GetChatByDiscordChannel(channelId, chat)) {
+        return "This channel isn't a RemoteCode chat.";
+    }
+    Agent agent;
+    if (!ResolveActiveAgentByNameOrId(agentRaw, agent)) {
+        return "'" + agentRaw + "' is not a known, active agent.";
+    }
+    if (chatStore_->IsParticipant(chat.id, "agent", agent.id)) {
+        return "'" + agent.name + "' is already in this chat.";
+    }
+
+    chatStore_->AddParticipant(chat.id, "agent", agent.id);
+    // The channel already existed before this agent joined — grant its own
+    // bot explicit access if it has one (shared-webhook agents need nothing
+    // extra; see GrantChannelAccess's own comment).
+    if (!agent.discordBotUserId.empty()) {
+        discordBot_->GrantChannelAccess(channelId, agent.discordBotUserId);
+    }
+    return "Added '" + agent.name + "' to this chat.";
+}
+
+std::string Orchestrator::HandleSlashCommandRemoveAgent(const std::string& channelId, const std::string& agentRaw) {
+    Chat chat;
+    if (!chatStore_->GetChatByDiscordChannel(channelId, chat)) {
+        return "This channel isn't a RemoteCode chat.";
+    }
+    Agent agent;
+    if (!ResolveActiveAgentByNameOrId(agentRaw, agent)) {
+        return "'" + agentRaw + "' is not a known, active agent.";
+    }
+    if (!chatStore_->IsParticipant(chat.id, "agent", agent.id)) {
+        return "'" + agent.name + "' isn't in this chat.";
+    }
+
+    chatStore_->RemoveParticipant(chat.id, "agent", agent.id);
+    return "Removed '" + agent.name + "' from this chat (history preserved).";
+}
+
+void Orchestrator::HandleSlashCommandCloseChat(const std::string& channelId) {
+    Chat chat;
+    if (!chatStore_->GetChatByDiscordChannel(channelId, chat)) {
+        log_(L"Orchestrator: /close-chat invoked in a channel with no matching chat (channel '" +
+             AsciiToWide(channelId) + L"').");
+        return;
+    }
+
+    chatStore_->SetChatStatus(chat.id, "archived");
+
+    if (!discordBot_->DeleteChannel(channelId)) {
+        log_(L"Orchestrator: failed to delete Discord channel '" + AsciiToWide(channelId) + L"' for closed chat '" +
+             AsciiToWide(chat.id) +
+             L"' (bot may lack Manage Channels there, or the channel was already gone) — the chat is "
+             L"archived regardless.");
+    }
 }

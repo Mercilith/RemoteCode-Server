@@ -364,6 +364,80 @@ json StartChat(ToolContext& ctx, const json& arguments, std::string& outError) {
     return json{{"chat_id", chatId}, {"status", "created"}};
 }
 
+json RequestAddAgentToChat(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("target_agent_id") || !arguments.contains("reason")) {
+        outError = "request_add_agent_to_chat requires 'target_agent_id' and 'reason'";
+        return {};
+    }
+    if (ctx.chatId.empty()) {
+        outError = "request_add_agent_to_chat has no current chat to request into";
+        return {};
+    }
+
+    const std::string targetId = arguments["target_agent_id"].get<std::string>();
+    Agent target;
+    if (!ctx.agentStore.Get(targetId, target) || target.status != "active") {
+        outError = "request_add_agent_to_chat: '" + targetId + "' is not a known, active agent";
+        return {};
+    }
+    if (ctx.chatStore.IsParticipant(ctx.chatId, "agent", targetId)) {
+        outError = "'" + targetId + "' is already a participant of this chat";
+        return {};
+    }
+
+    Agent sender;
+    if (!ctx.agentStore.Get(ctx.agentId, sender)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+    if (!Mentions::IsAllowedToMessage(sender, targetId)) {
+        outError = "request_add_agent_to_chat: you are not allowed to message '" + targetId + "' (see can_message)";
+        return {};
+    }
+
+    const std::string reason = arguments["reason"].get<std::string>();
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+
+    std::ostringstream summary;
+    summary << "**" << sender.name << " wants to add " << target.name << " to this chat**\n" << reason
+            << "\n\nReact with \xE2\x9C\x85 to approve or \xE2\x9D\x8C to reject.";
+
+    Message message;
+    message.chatId = ctx.chatId;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "approval_request";
+    message.content = summary.str();
+    message.createdAt = now;
+    const int64_t messageId = ctx.chatStore.InsertMessage(message);
+    if (messageId < 0) {
+        outError = "failed to record the approval request message";
+        return {};
+    }
+
+    // "add_agent_to_chat" is the second approval kind (see ApprovalStore.h);
+    // it reuses the exact same table shape as "create_agent" — kind is a
+    // free-text discriminator and payload a free-form JSON blob, so no
+    // schema change was needed, only a new kind value and payload shape
+    // (chat_id + target_agent_id) that Orchestrator::HandleReaction knows
+    // how to interpret.
+    Approval approval;
+    approval.id = "approval-add-" + ctx.chatId + "-" + targetId + "-" + std::to_string(now);
+    approval.chatId = ctx.chatId;
+    approval.messageId = messageId;
+    approval.requestedBy = ctx.agentId;
+    approval.kind = "add_agent_to_chat";
+    approval.payloadJson = json{{"chat_id", ctx.chatId}, {"target_agent_id", targetId}}.dump();
+    approval.status = "pending";
+    approval.createdAt = now;
+    if (!ctx.approvalStore.Create(approval)) {
+        outError = "failed to record the approval";
+        return {};
+    }
+
+    return json{{"status", "pending_approval"}, {"target_agent_id", targetId}, {"chat_id", ctx.chatId}};
+}
+
 // The only two template names this tool surface allows viewing/editing —
 // deliberately not open to arbitrary new names (see PromptTemplateNames in
 // db/PromptTemplateStore.h, the single source of truth both this file and
@@ -565,6 +639,24 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "request_add_agent_to_chat"},
+            {"description",
+             "Ask Cardon to add another agent into the current chat (a group chat or your DM with him) — "
+             "posts a request with checkmark/cross reactions; the target only actually joins once Cardon "
+             "approves. Rejected outright if the target isn't a known active agent, is already in this "
+             "chat, or your can_message doesn't permit messaging them."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"target_agent_id", {{"type", "string"}}},
+                      {"reason", {{"type", "string"}, {"description", "Why this agent should join."}}},
+                  }},
+                 {"required", json::array({"target_agent_id", "reason"})},
+             }},
+        },
+        {
             {"name", "get_prompt_template"},
             {"description",
              "Read one of the two built-in, server-authored repo-onboarding prompt templates by name "
@@ -669,6 +761,8 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = ListMyChats(ctx, arguments, outError);
     } else if (toolName == "start_chat") {
         result = StartChat(ctx, arguments, outError);
+    } else if (toolName == "request_add_agent_to_chat") {
+        result = RequestAddAgentToChat(ctx, arguments, outError);
     } else if (toolName == "get_prompt_template") {
         result = GetPromptTemplate(ctx, arguments, outError);
     } else if (toolName == "update_prompt_template") {

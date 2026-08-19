@@ -60,6 +60,42 @@ public:
     // `/add-repo` slash command handler.
     std::string AddRepo(const std::string& githubUrl, const std::string& notes, std::string& outError);
 
+    // --- Chat-lifecycle slash commands (see DiscordBot::SetSlashCommandX
+    // for wiring) — each is plain C++ bookkeeping (chat/participant DB
+    // writes plus at most one Discord REST call), never an agent turn.
+    // create-chat/create-dm/add-agent/remove-agent run synchronously and
+    // return the exact text to reply to the interaction with (success
+    // message with a channel mention, or a user-facing error). close-chat
+    // is void/fire-and-forget instead — see its own comment.
+
+    // Resolves 2+ agents (space/comma separated names or ids) into a brand
+    // new "agentchat-..." chat (never resumed from anywhere), adds them all
+    // as auto_respond participants, and lazily creates its Discord channel.
+    std::string HandleSlashCommandCreateChat(const std::string& agentsRaw, const std::string& title);
+    // Gets-or-creates the same "dm-<agentId>" chat message_user itself uses
+    // (see mcp/Tools.cpp's MessageUser) so a DM opened this way and one an
+    // agent opens via message_user are always the same chat, never
+    // duplicated.
+    std::string HandleSlashCommandCreateDm(const std::string& agentRaw);
+    // Adds one agent to the chat backing `channelId`. Grants the agent's own
+    // bot explicit channel access if it has one (the channel may already
+    // exist from before this agent joined).
+    std::string HandleSlashCommandAddAgent(const std::string& channelId, const std::string& agentRaw);
+    // Drops the chat_participants row only — chat history is untouched.
+    std::string HandleSlashCommandRemoveAgent(const std::string& channelId, const std::string& agentRaw);
+    // Archives the chat backing `channelId` and deletes the channel itself.
+    // Fire-and-forget: the interaction's ack already happened in
+    // DiscordBot::HandleSlashCommand before this runs (see
+    // SlashCommandCloseChatHandler's comment) — replying into a channel this
+    // call is about to delete would fail if attempted afterward, so there's
+    // nothing meaningful left to return here.
+    void HandleSlashCommandCloseChat(const std::string& channelId);
+    // Case-insensitive match of `token` against an active agent's id or
+    // Slugify(name) — the same rule Mentions::ParseMentions uses for @tags,
+    // reused here so a Discord slash command's free-text "agent" option
+    // behaves consistently with in-chat @mentions.
+    bool ResolveActiveAgentByNameOrId(const std::string& token, Agent& outAgent);
+
 private:
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
     // every active participant agent (the unchanged default for a real

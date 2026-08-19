@@ -15,6 +15,18 @@ struct Chat {
     int64_t createdAt = 0;
 };
 
+// A chat's agent participant plus its dispatch mode — see
+// ChatStore::ListParticipantAgents / SetParticipantMode.
+struct ParticipantAgent {
+    std::string agentId;
+    std::string mode; // "auto_respond" (default) | "listening"
+};
+
+namespace ParticipantMode {
+constexpr const char* kAutoRespond = "auto_respond";
+constexpr const char* kListening = "listening";
+} // namespace ParticipantMode
+
 struct Message {
     int64_t id = 0;
     std::string chatId;
@@ -34,27 +46,54 @@ public:
     bool CreateChat(const Chat& chat);
     bool GetChatByDiscordChannel(const std::string& discordChannelId, Chat& outChat);
     bool GetChat(const std::string& chatId, Chat& outChat);
-    // Every chat, most recently created first — used by the debug
-    // `/debug/chats` admin endpoint so a caller can pick a chat_id without
-    // querying SQLite directly.
-    std::vector<Chat> ListChats();
+    // Every chat, most recently created first. Archived chats are excluded
+    // unless includeArchived is true — used by the debug `/debug/chats`
+    // admin endpoint (which passes true, so nothing simply disappears from
+    // the debug view) so a caller can pick a chat_id without querying
+    // SQLite directly.
+    std::vector<Chat> ListChats(bool includeArchived = false);
     // Every chat `participantId` (an agent id) currently participates in —
     // joins chats against chat_participants where participant_type='agent'.
-    // Used by the list_my_chats MCP tool.
-    std::vector<Chat> ListChatsForParticipant(const std::string& participantId);
+    // Archived chats are excluded unless includeArchived is true. Used by
+    // the list_my_chats MCP tool (default: archived chats don't clutter an
+    // agent's own chat list).
+    std::vector<Chat> ListChatsForParticipant(const std::string& participantId, bool includeArchived = false);
     // Persists a Discord channel id onto a chat that was created without
     // one yet — used once a lazily-created DM channel (see
     // Orchestrator::EnsureChannelForChat) actually exists.
     bool SetChatDiscordChannel(const std::string& chatId, const std::string& discordChannelId);
+    // Sets chats.status (e.g. "active" -> "archived" via /close-chat).
+    // Archiving does not touch chat_participants or messages — history is
+    // preserved, only the chat stops showing up in default ListChats*
+    // results and (once its Discord channel is deleted alongside this by
+    // the caller) stops being reachable from Discord.
+    bool SetChatStatus(const std::string& chatId, const std::string& status);
 
     bool AddParticipant(
+        const std::string& chatId, const std::string& participantType, const std::string& participantId);
+    // Drops the chat_participants row only — never touches messages, so
+    // chat history is preserved. Used by /remove-agent.
+    bool RemoveParticipant(
         const std::string& chatId, const std::string& participantType, const std::string& participantId);
     bool IsParticipant(
         const std::string& chatId, const std::string& participantType, const std::string& participantId);
     // Agent ids participating in a chat — this pass's addressing rule is
     // simply "every agent participant of the chat responds," so this is
-    // the whole of Section 6.3's logic for now.
+    // the whole of Section 6.3's logic for now. Does NOT report mode; see
+    // ListParticipantAgents for the mode-aware variant Orchestrator's
+    // dispatch loop actually needs.
     std::vector<std::string> ListParticipantAgentIds(const std::string& chatId);
+    // Same membership as ListParticipantAgentIds, but paired with each
+    // participant's dispatch mode — what Orchestrator::HandleIncomingMessage
+    // uses to decide whether an untagged agent gets queued for a turn on
+    // every message ("auto_respond") or only when explicitly @-tagged
+    // ("listening").
+    std::vector<ParticipantAgent> ListParticipantAgents(const std::string& chatId);
+    // Sets a participant's dispatch mode — see ParticipantMode above.
+    // No-op (returns true) if the participant row doesn't exist to update.
+    bool SetParticipantMode(
+        const std::string& chatId, const std::string& participantType, const std::string& participantId,
+        const std::string& mode);
 
     // Returns the new message's id, or -1 on failure.
     int64_t InsertMessage(const Message& message);

@@ -35,6 +35,33 @@ using DiscordReactionHandler =
 using SlashCommandAddRepoHandler =
     std::function<void(const std::string& url, const std::string& notes)>;
 
+// The five chat-lifecycle slash commands below are all pure bookkeeping (DB
+// writes plus at most one Discord REST call — channel create/delete or a
+// permission-overwrite edit), never an agent turn, so unlike add-repo's
+// "ack now, do the slow part later" pattern, create-chat/create-dm/
+// add-agent/remove-agent run synchronously and reply with the real result
+// (matching the existing synchronous-REST-call precedent already used by
+// CreateDmChannel/EnsureWebhook/AddReaction below). close-chat is the one
+// exception — see its handler's own comment for why it stays fire-and-forget
+// like add-repo.
+//
+// `agentsRaw`/`agentRaw` are the raw space-or-comma-separated agent name/id
+// list from the slash command's string option — dpp has no good multi-select
+// option type, so resolution against AgentStore::ListAll() happens on the
+// handler side (Orchestrator), not here.
+using SlashCommandCreateChatHandler =
+    std::function<std::string(const std::string& agentsRaw, const std::string& title)>;
+using SlashCommandCreateDmHandler = std::function<std::string(const std::string& agentRaw)>;
+using SlashCommandAddAgentHandler =
+    std::function<std::string(const std::string& channelId, const std::string& agentRaw)>;
+using SlashCommandRemoveAgentHandler =
+    std::function<std::string(const std::string& channelId, const std::string& agentRaw)>;
+// void, not std::string — see the comment above and the handler's own
+// comment in Orchestrator.cpp: replying into a channel this call is about to
+// delete has to happen strictly before the delete, so this can't be a
+// simple synchronous "compute the reply text" callback like the other four.
+using SlashCommandCloseChatHandler = std::function<void(const std::string& channelId)>;
+
 // Thin DPP wrapper: gateway connect, message handler (writes into
 // ChatStore), and a webhook-based post helper so each agent can appear
 // under its own name/avatar in a channel.
@@ -60,6 +87,16 @@ public:
     // and dispatches invocations here. No-op (never registers/dispatches)
     // if never called — matches the pattern of the other optional handlers.
     void SetSlashCommandAddRepoHandler(SlashCommandAddRepoHandler handler);
+    // Registers /create-chat, /create-dm, /add-agent, /remove-agent, and
+    // /close-chat as global slash commands on connect and dispatches
+    // invocations to the handlers below. Each is independently optional
+    // (never registered/dispatched) — same no-op-if-unset pattern as
+    // SetSlashCommandAddRepoHandler.
+    void SetSlashCommandCreateChatHandler(SlashCommandCreateChatHandler handler);
+    void SetSlashCommandCreateDmHandler(SlashCommandCreateDmHandler handler);
+    void SetSlashCommandAddAgentHandler(SlashCommandAddAgentHandler handler);
+    void SetSlashCommandRemoveAgentHandler(SlashCommandRemoveAgentHandler handler);
+    void SetSlashCommandCloseChatHandler(SlashCommandCloseChatHandler handler);
 
     // Connects to the Gateway and blocks until Stop() is called. Intended
     // to be run on its own thread by Orchestrator.
@@ -101,6 +138,24 @@ public:
         const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
         const std::vector<std::string>& extraBotUserIds);
 
+    // Grants view/send/read-history to `userId` on an already-existing
+    // channel — used when an agent with its own Discord bot joins a chat
+    // whose Discord channel was created before that agent was a participant
+    // (e.g. via /add-agent, or an approved request_add_agent_to_chat), so it
+    // isn't stuck unable to see a channel it just joined. A no-op for
+    // shared-webhook agents (no separate Discord account to grant) — callers
+    // only invoke this when the joining agent has its own bot user id.
+    bool GrantChannelAccess(const std::string& channelId, const std::string& userId);
+
+    // Deletes a channel outright — used by /close-chat. Best-effort: returns
+    // false (never throws/crashes) on any failure, e.g. the bot lacking
+    // Manage Channels in that particular channel, or the channel already
+    // being gone. Every channel this server creates (CreateDmChannel above)
+    // is created by this same shared bot, so this should always succeed for
+    // a chat's own channel in practice; the false-return path exists for
+    // channels created some other way.
+    bool DeleteChannel(const std::string& channelId);
+
     // True if shard 0 hasn't received a heartbeat ACK from Discord in an
     // unreasonably long time — the local socket can look connected (and
     // keep sending outbound heartbeats on its own timer) while the remote
@@ -124,6 +179,11 @@ private:
     DiscordLogHandler onLog_;
     DiscordReactionHandler onReaction_;
     SlashCommandAddRepoHandler onSlashCommandAddRepo_;
+    SlashCommandCreateChatHandler onSlashCommandCreateChat_;
+    SlashCommandCreateDmHandler onSlashCommandCreateDm_;
+    SlashCommandAddAgentHandler onSlashCommandAddAgent_;
+    SlashCommandRemoveAgentHandler onSlashCommandRemoveAgent_;
+    SlashCommandCloseChatHandler onSlashCommandCloseChat_;
     // Guards bot_ against a race between Run() reassigning it (fresh
     // cluster per (re)connect) and IsZombied() reading it from the
     // watchdog's own timer thread. Other members' cross-thread use of bot_
