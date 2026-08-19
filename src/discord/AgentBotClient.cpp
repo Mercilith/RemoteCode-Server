@@ -4,6 +4,8 @@
 
 #include <future>
 
+#include "../util/Text.h"
+
 AgentBotClient::AgentBotClient(std::string token) {
     // shards=0 (NO_SHARDS): REST-only, never opens a websocket to the
     // Gateway. start() still has to run — that's what pumps the REST
@@ -35,15 +37,25 @@ bool AgentBotClient::FetchSelf(std::string& outUserId, std::string& outUsername)
 }
 
 std::string AgentBotClient::PostAsSelf(const std::string& channelId, const std::string& content) {
-    std::promise<dpp::confirmation_callback_t> promise;
-    std::future<dpp::confirmation_callback_t> future = promise.get_future();
-    bot_->message_create(
-        dpp::message(std::stoull(channelId), content),
-        [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
-    const dpp::confirmation_callback_t result = future.get();
-    if (result.is_error()) {
-        return "";
+    // See DiscordBot::PostAsAgent's identical comment — Discord rejects a
+    // single message over ~2000 chars outright, found via a real agent
+    // report silently vanishing (stored in the DB, never posted, no error
+    // surfaced). Post every chunk; the first chunk's id is what's tracked.
+    std::string firstMessageId;
+    for (const std::string& chunk : ChunkForDiscord(content)) {
+        std::promise<dpp::confirmation_callback_t> promise;
+        std::future<dpp::confirmation_callback_t> future = promise.get_future();
+        bot_->message_create(
+            dpp::message(std::stoull(channelId), chunk),
+            [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+        const dpp::confirmation_callback_t result = future.get();
+        if (result.is_error()) {
+            continue; // best-effort — a later chunk failing shouldn't lose earlier ones
+        }
+        const dpp::message posted = std::get<dpp::message>(result.value);
+        if (firstMessageId.empty()) {
+            firstMessageId = std::to_string(posted.id);
+        }
     }
-    const dpp::message posted = std::get<dpp::message>(result.value);
-    return std::to_string(posted.id);
+    return firstMessageId;
 }

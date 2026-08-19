@@ -17,6 +17,7 @@
 #include "../src/util/ActivityLog.h"
 #include "../src/util/GitHubRepo.h"
 #include "../src/util/Mentions.h"
+#include "../src/util/Text.h"
 
 using nlohmann::json;
 
@@ -934,6 +935,37 @@ void TestStartChatAndListMyChatsTools() {
     Check(foundNewChat, "list_my_chats includes the chat start_chat just created");
 }
 
+void TestChunkForDiscord() {
+    Check(
+        ChunkForDiscord("short message").size() == 1 && ChunkForDiscord("short message")[0] == "short message",
+        "ChunkForDiscord: content under the limit is returned as a single unchanged chunk");
+    Check(ChunkForDiscord("").size() == 1, "ChunkForDiscord: empty content still returns one (empty) chunk");
+
+    // Over the 1990-char soft cap, no newlines at all — must hard-split,
+    // and every chunk must individually be well under Discord's real 2000
+    // hard cap.
+    const std::string longFlat(2692, 'x');
+    const std::vector<std::string> flatChunks = ChunkForDiscord(longFlat);
+    Check(flatChunks.size() >= 2, "ChunkForDiscord: content over the limit is split into multiple chunks");
+    for (const std::string& chunk : flatChunks) {
+        Check(chunk.size() <= 2000, "ChunkForDiscord: every chunk is at or under Discord's 2000-char cap");
+    }
+    std::string reassembled;
+    for (const std::string& chunk : flatChunks) {
+        reassembled += chunk;
+    }
+    Check(reassembled == longFlat, "ChunkForDiscord: concatenating all chunks reproduces the original content");
+
+    // With a newline conveniently placed near the split point, prefer
+    // breaking there over a mid-word hard split.
+    const std::string withNewline = std::string(1985, 'a') + "\nSecond paragraph starts here.";
+    const std::vector<std::string> newlineChunks = ChunkForDiscord(withNewline);
+    Check(
+        newlineChunks.size() == 2 && newlineChunks[0] == std::string(1985, 'a') &&
+            newlineChunks[1] == "Second paragraph starts here.",
+        "ChunkForDiscord: prefers splitting on a newline near the limit over a hard mid-content split");
+}
+
 void TestMentions() {
     Agent alex;
     alex.id = "alex";
@@ -1214,6 +1246,7 @@ int main() {
     TestListAgentsTool();
     TestStartChatAndListMyChatsTools();
     TestMentions();
+    TestChunkForDiscord();
     TestGitHubRepoParseGitHubUrl();
     TestRepoStore();
     TestPromptTemplateStore();

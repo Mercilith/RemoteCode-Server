@@ -5,6 +5,8 @@
 #include <ctime>
 #include <future>
 
+#include "../util/Text.h"
+
 DiscordBot::DiscordBot(std::string token, ChatStore& chatStore, AgentStore& agentStore)
     : token_(std::move(token)), chatStore_(chatStore), agentStore_(agentStore) {}
 
@@ -198,29 +200,45 @@ std::string DiscordBot::PostAsAgent(
     hook.id = std::stoull(webhookId);
     hook.token = webhookToken;
 
-    dpp::message msg;
-    msg.content = content;
+    // Discord rejects a single message over ~2000 chars outright — found
+    // the hard way (a longer agent report got stored in the DB but never
+    // appeared in Discord, with no error surfaced anywhere). Post every
+    // chunk; the first chunk's message id is what gets tracked as "this
+    // message's" Discord id.
+    std::string firstMessageId;
+    for (const std::string& chunk : ChunkForDiscord(content)) {
+        dpp::message msg;
+        msg.content = chunk;
 
-    std::promise<dpp::confirmation_callback_t> promise;
-    std::future<dpp::confirmation_callback_t> future = promise.get_future();
-    // wait=true so the callback carries the posted dpp::message (with its
-    // real id) instead of firing immediately with nothing.
-    bot_->execute_webhook(
-        hook, msg, true, 0, "",
-        [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
-    const dpp::confirmation_callback_t result = future.get();
-    if (result.is_error()) {
-        return "";
+        std::promise<dpp::confirmation_callback_t> promise;
+        std::future<dpp::confirmation_callback_t> future = promise.get_future();
+        // wait=true so the callback carries the posted dpp::message (with
+        // its real id) instead of firing immediately with nothing.
+        bot_->execute_webhook(
+            hook, msg, true, 0, "",
+            [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+        const dpp::confirmation_callback_t result = future.get();
+        if (result.is_error()) {
+            if (onLog_) {
+                onLog_("execute_webhook failed for agent '" + agentId + "': " + result.get_error().message);
+            }
+            continue; // best-effort — a later chunk failing shouldn't lose earlier ones
+        }
+        const dpp::message posted = std::get<dpp::message>(result.value);
+        if (firstMessageId.empty()) {
+            firstMessageId = std::to_string(posted.id);
+        }
     }
-    const dpp::message posted = std::get<dpp::message>(result.value);
-    return std::to_string(posted.id);
+    return firstMessageId;
 }
 
 void DiscordBot::PostPlain(const std::string& channelId, const std::string& content) {
     if (!bot_) {
         return;
     }
-    bot_->message_create(dpp::message(std::stoull(channelId), content));
+    for (const std::string& chunk : ChunkForDiscord(content)) {
+        bot_->message_create(dpp::message(std::stoull(channelId), chunk));
+    }
 }
 
 bool DiscordBot::AddReaction(
