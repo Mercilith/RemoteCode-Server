@@ -48,6 +48,10 @@ void DiscordBot::SetSlashCommandCloseChatHandler(SlashCommandCloseChatHandler ha
     onSlashCommandCloseChat_ = std::move(handler);
 }
 
+void DiscordBot::SetSlashCommandCreateWorkspaceHandler(SlashCommandCreateWorkspaceHandler handler) {
+    onSlashCommandCreateWorkspace_ = std::move(handler);
+}
+
 void DiscordBot::Run() {
     {
         std::lock_guard<std::mutex> lock(botMutex_);
@@ -110,6 +114,16 @@ void DiscordBot::Run() {
             dpp::slashcommand closeChatCommand(
                 "close-chat", "Archive this chat and delete its Discord channel.", bot_->me.id);
             bot_->global_command_create(closeChatCommand);
+        }
+        if (onSlashCommandCreateWorkspace_) {
+            dpp::slashcommand createWorkspaceCommand(
+                "create-workspace",
+                "Create a git-worktree workspace across one or more already-imported repos.", bot_->me.id);
+            createWorkspaceCommand.add_option(dpp::command_option(
+                dpp::co_string, "repos", "Space or comma separated repo names/ids (1 or more)", true));
+            createWorkspaceCommand.add_option(
+                dpp::command_option(dpp::co_string, "title", "Optional workspace title", false));
+            bot_->global_command_create(createWorkspaceCommand);
         }
     });
 
@@ -246,6 +260,18 @@ void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
         return;
     }
 
+    if (name == "create-workspace" && onSlashCommandCreateWorkspace_) {
+        const std::string repos = GetStringParam(event, "repos");
+        const std::string title = GetStringParam(event, "title");
+        // Synchronous, same as create-chat above — plain bookkeeping plus a
+        // handful of Discord REST calls (category + channel create), never
+        // an agent turn. The actual git worktree creation is a fast local
+        // subprocess call, not a network round-trip, so this stays well
+        // inside Discord's 3-second ack window in practice.
+        event.reply(onSlashCommandCreateWorkspace_(repos, title));
+        return;
+    }
+
     if (name == "close-chat" && onSlashCommandCloseChat_) {
         const std::string channelId = std::to_string(event.command.channel_id);
         // Fire-and-forget, unlike the four handlers above — see
@@ -364,24 +390,15 @@ std::string DiscordBot::BotUserId() const {
     return std::to_string(bot_->me.id);
 }
 
-std::string DiscordBot::CreateDmChannel(
-    const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
+void DiscordBot::ApplyPrivateChannelOverwrites(
+    dpp::channel& c, const std::string& guildId, const std::string& humanUserId,
     const std::vector<std::string>& extraBotUserIds) {
-    if (!bot_ || guildId.empty() || humanUserId.empty()) {
-        return "";
-    }
-
-    dpp::channel c;
-    c.set_name(channelName);
-    c.set_type(dpp::CHANNEL_TEXT);
-    c.set_guild_id(std::stoull(guildId));
-
     constexpr uint64_t kView = dpp::p_view_channel;
     constexpr uint64_t kUse = dpp::p_view_channel | dpp::p_send_messages | dpp::p_read_message_history;
 
     // Deny the @everyone role (its id is always the guild's own id) view
     // access, then explicitly allow the specific accounts that should see
-    // this channel — that combination is what makes it "private."
+    // this channel/category — that combination is what makes it "private."
     c.add_permission_overwrite(std::stoull(guildId), dpp::ot_role, 0, kView);
     c.add_permission_overwrite(std::stoull(humanUserId), dpp::ot_member, kUse, 0);
     const std::string ownBotUserId = BotUserId();
@@ -393,6 +410,47 @@ std::string DiscordBot::CreateDmChannel(
             c.add_permission_overwrite(std::stoull(extraBotUserId), dpp::ot_member, kUse, 0);
         }
     }
+}
+
+std::string DiscordBot::CreateDmChannel(
+    const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
+    const std::vector<std::string>& extraBotUserIds, const std::string& parentCategoryId) {
+    if (!bot_ || guildId.empty() || humanUserId.empty()) {
+        return "";
+    }
+
+    dpp::channel c;
+    c.set_name(channelName);
+    c.set_type(dpp::CHANNEL_TEXT);
+    c.set_guild_id(std::stoull(guildId));
+    if (!parentCategoryId.empty()) {
+        c.set_parent_id(std::stoull(parentCategoryId));
+    }
+    ApplyPrivateChannelOverwrites(c, guildId, humanUserId, extraBotUserIds);
+
+    std::promise<dpp::confirmation_callback_t> promise;
+    std::future<dpp::confirmation_callback_t> future = promise.get_future();
+    bot_->channel_create(c, [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+    const dpp::confirmation_callback_t result = future.get();
+    if (result.is_error()) {
+        return "";
+    }
+    const dpp::channel created = std::get<dpp::channel>(result.value);
+    return std::to_string(created.id);
+}
+
+std::string DiscordBot::CreateCategory(
+    const std::string& guildId, const std::string& categoryName, const std::string& humanUserId,
+    const std::vector<std::string>& extraBotUserIds) {
+    if (!bot_ || guildId.empty() || humanUserId.empty()) {
+        return "";
+    }
+
+    dpp::channel c;
+    c.set_name(categoryName);
+    c.set_type(dpp::CHANNEL_CATEGORY);
+    c.set_guild_id(std::stoull(guildId));
+    ApplyPrivateChannelOverwrites(c, guildId, humanUserId, extraBotUserIds);
 
     std::promise<dpp::confirmation_callback_t> promise;
     std::future<dpp::confirmation_callback_t> future = promise.get_future();

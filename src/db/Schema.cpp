@@ -122,6 +122,20 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
     updated_at  INTEGER NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS workspaces (
+    id                   TEXT PRIMARY KEY,
+    title                TEXT,
+    repo_ids             TEXT NOT NULL,
+    discord_category_id  TEXT,
+    chat_id              TEXT NOT NULL,
+    created_by           TEXT NOT NULL,
+    status               TEXT NOT NULL,
+    last_error           TEXT,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace

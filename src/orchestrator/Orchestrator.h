@@ -15,6 +15,7 @@
 #include "../db/Database.h"
 #include "../db/PromptTemplateStore.h"
 #include "../db/RepoStore.h"
+#include "../db/WorkspaceStore.h"
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
 #include "../http/AdminServer.h"
@@ -96,6 +97,44 @@ public:
     // behaves consistently with in-chat @mentions.
     bool ResolveActiveAgentByNameOrId(const std::string& token, Agent& outAgent);
 
+    // --- create_workspace: the single core method both the /create-workspace
+    // slash command and the create_workspace MCP tool funnel into (the MCP
+    // tool runs in a separate subprocess with no live Discord connection —
+    // see mcp/Tools.cpp's CreateWorkspaceTool and WorkspaceCreator.h's header
+    // comment — so it calls WorkspaceCreator::Create directly instead of this
+    // method, then leaves the Discord half for EnsurePendingWorkspaceChannels
+    // below to pick up).
+
+    // Resolves repos (id or name, via RepoStore), pulls in best-effort
+    // heuristic dependencies, creates a git worktree per resolved repo, and
+    // creates the workspace's Discord category + initial channel — all
+    // synchronously (worktree creation is a fast local subprocess call, not
+    // a network round-trip, so this comfortably fits inside a slash command's
+    // 3-second ack window in practice). `requestedByAgentId` is empty for
+    // Cardon via the slash command. Returns the new workspace's id, or an
+    // empty string with `outError` set on any failure.
+    std::string CreateWorkspace(
+        const std::vector<std::string>& repoIdsOrNames, const std::string& title,
+        const std::string& requestedByAgentId, std::string& outError);
+    // /create-workspace's Discord entry point — splits `reposRaw` the same
+    // way /create-chat splits its agents option, calls CreateWorkspace, and
+    // returns the exact text to reply to the interaction with.
+    std::string HandleSlashCommandCreateWorkspace(const std::string& reposRaw, const std::string& title);
+    // Creates `workspace`'s Discord category and initial text channel
+    // (parented under it), persisting whichever of the two succeed and
+    // advancing workspace.status to "active" only once both exist. Safe to
+    // call repeatedly on the same workspace — re-reads the row so it never
+    // creates a second category once one already exists, and only attempts
+    // whichever of category/channel is still missing. Returns true once both
+    // exist (whether they already did, or were just created here).
+    bool EnsureWorkspaceDiscordAssets(const std::string& workspaceId);
+    // Polls WorkspaceStore::ListPendingDiscordSetup and calls
+    // EnsureWorkspaceDiscordAssets for each — the workspace equivalent of
+    // PostPendingApprovals, called from the same housekeeping spot at the
+    // end of HandleIncomingMessage. Picks up workspaces the create_workspace
+    // MCP tool created (DB/filesystem-only, no Discord access of its own).
+    void EnsurePendingWorkspaceChannels();
+
 private:
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
     // every active participant agent (the unchanged default for a real
@@ -170,6 +209,7 @@ private:
     std::unique_ptr<AgentSessionStore> agentSessionStore_;
     std::unique_ptr<ChatSummaryStore> chatSummaryStore_;
     std::unique_ptr<RepoStore> repoStore_;
+    std::unique_ptr<WorkspaceStore> workspaceStore_;
     std::unique_ptr<PromptTemplateStore> promptTemplateStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;

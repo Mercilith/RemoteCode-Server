@@ -11,6 +11,7 @@
 
 namespace dpp {
 class cluster;
+class channel;
 struct message_create_t;
 struct message_reaction_add_t;
 struct slashcommand_t;
@@ -62,6 +63,16 @@ using SlashCommandRemoveAgentHandler =
 // simple synchronous "compute the reply text" callback like the other four.
 using SlashCommandCloseChatHandler = std::function<void(const std::string& channelId)>;
 
+// /create-workspace — `reposRaw` is the raw space/comma-separated repo
+// name/id list (same free-text-then-resolve-on-the-handler-side pattern as
+// agentsRaw above; there's no dpp multi-select type here either), `title`
+// the optional title option. Runs synchronously and replies with the real
+// result, same class of work as create-chat/create-dm (plain bookkeeping
+// plus a handful of Discord REST calls — category + channel create, no
+// agent turn) rather than add-repo's ack-now/work-later pattern.
+using SlashCommandCreateWorkspaceHandler =
+    std::function<std::string(const std::string& reposRaw, const std::string& title)>;
+
 // Thin DPP wrapper: gateway connect, message handler (writes into
 // ChatStore), and a webhook-based post helper so each agent can appear
 // under its own name/avatar in a channel.
@@ -97,6 +108,7 @@ public:
     void SetSlashCommandAddAgentHandler(SlashCommandAddAgentHandler handler);
     void SetSlashCommandRemoveAgentHandler(SlashCommandRemoveAgentHandler handler);
     void SetSlashCommandCloseChatHandler(SlashCommandCloseChatHandler handler);
+    void SetSlashCommandCreateWorkspaceHandler(SlashCommandCreateWorkspaceHandler handler);
 
     // Connects to the Gateway and blocks until Stop() is called. Intended
     // to be run on its own thread by Orchestrator.
@@ -134,8 +146,25 @@ public:
     // one — it may end up posting there instead of this shared bot; empty
     // ids are skipped). Returns the new channel's id, or an empty string on
     // failure.
+    // `parentCategoryId`, if non-empty, sets the created channel's parent
+    // category (dpp::channel::set_parent_id) — used by workspace chat
+    // channels, which live under a dedicated category (see CreateCategory
+    // below). Empty (the default) preserves the original parent-less
+    // behavior every other caller (DM/group chats) still wants.
     std::string CreateDmChannel(
         const std::string& guildId, const std::string& channelName, const std::string& humanUserId,
+        const std::vector<std::string>& extraBotUserIds, const std::string& parentCategoryId = "");
+
+    // Creates a private category (channel group) in `guildId` named
+    // `categoryName`, with the exact same deny-@everyone/allow-listed-
+    // accounts permission pattern CreateDmChannel uses — child channels
+    // parented under it (via CreateDmChannel's parentCategoryId) inherit
+    // those overwrites unless a channel-level overwrite says otherwise, so
+    // this is what actually makes a workspace's whole category private.
+    // Returns the new category's id, or an empty string on failure. Used by
+    // Orchestrator::EnsureWorkspaceDiscordAssets to back a new workspace.
+    std::string CreateCategory(
+        const std::string& guildId, const std::string& categoryName, const std::string& humanUserId,
         const std::vector<std::string>& extraBotUserIds);
 
     // Grants view/send/read-history to `userId` on an already-existing
@@ -171,6 +200,13 @@ private:
     bool EnsureWebhook(
         const std::string& channelId, const std::string& agentId, const std::string& agentName,
         std::string& outWebhookId, std::string& outWebhookToken);
+    // Deny @everyone view, then allow humanUserId, this bot's own account,
+    // and every id in extraBotUserIds — the "private channel/category"
+    // permission pattern shared by CreateDmChannel and CreateCategory,
+    // factored out here so it lives in exactly one place.
+    void ApplyPrivateChannelOverwrites(
+        dpp::channel& c, const std::string& guildId, const std::string& humanUserId,
+        const std::vector<std::string>& extraBotUserIds);
 
     std::string token_;
     ChatStore& chatStore_;
@@ -184,6 +220,7 @@ private:
     SlashCommandAddAgentHandler onSlashCommandAddAgent_;
     SlashCommandRemoveAgentHandler onSlashCommandRemoveAgent_;
     SlashCommandCloseChatHandler onSlashCommandCloseChat_;
+    SlashCommandCreateWorkspaceHandler onSlashCommandCreateWorkspace_;
     // Guards bot_ against a race between Run() reassigning it (fresh
     // cluster per (re)connect) and IsZombied() reading it from the
     // watchdog's own timer thread. Other members' cross-thread use of bot_
