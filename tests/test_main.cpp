@@ -805,6 +805,84 @@ void TestListAgentsTool() {
         "list_agents returns id/name/description for the active agent");
 }
 
+void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    // Alex holds update_agent, so should see tool_permissions/can_message.
+    SeedTestAgent(agentStore, "alex", {"list_agents", "update_agent"});
+    // Tyrell doesn't, so should NOT — but still needs list_agents itself to
+    // make the second call below (as tyrell) succeed at all.
+    SeedTestAgent(agentStore, "tyrell", {"list_agents", "post_message", "read_chat"});
+
+    Agent tyrell;
+    agentStore.Get("tyrell", tyrell);
+    tyrell.canMessageJson = json::array({"*"}).dump();
+    agentStore.Upsert(tyrell);
+
+    ActivityLog activityLog(L"test-logs", "test-list-agents-permissions");
+
+    // As alex (holds update_agent): permissions should be visible.
+    {
+        McpServer server(
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+            "alex", "chat-1");
+        const std::string listCall = json{
+            {"jsonrpc", "2.0"},
+            {"id", 1},
+            {"method", "tools/call"},
+            {"params", {{"name", "list_agents"}, {"arguments", json::object()}}},
+        }.dump();
+        const json response = json::parse(server.HandleLine(listCall));
+        Check(response["result"]["isError"] == false, "list_agents (as alex) call succeeds");
+        const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        json tyrellEntry;
+        for (const json& entry : result) {
+            if (entry["id"] == "tyrell") {
+                tyrellEntry = entry;
+            }
+        }
+        Check(
+            tyrellEntry.contains("tool_permissions") &&
+                tyrellEntry["tool_permissions"] == json::array({"list_agents", "post_message", "read_chat"}),
+            "list_agents: a caller holding update_agent sees other agents' tool_permissions");
+        Check(
+            tyrellEntry.contains("can_message") && tyrellEntry["can_message"] == json::array({"*"}),
+            "list_agents: a caller holding update_agent sees other agents' can_message");
+    }
+
+    // As tyrell (no update_agent): permissions should be hidden.
+    {
+        McpServer server(
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+            "tyrell", "chat-1");
+        const std::string listCall = json{
+            {"jsonrpc", "2.0"},
+            {"id", 2},
+            {"method", "tools/call"},
+            {"params", {{"name", "list_agents"}, {"arguments", json::object()}}},
+        }.dump();
+        const json response = json::parse(server.HandleLine(listCall));
+        Check(response["result"]["isError"] == false, "list_agents (as tyrell) call succeeds");
+        const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        json alexEntry;
+        for (const json& entry : result) {
+            if (entry["id"] == "alex") {
+                alexEntry = entry;
+            }
+        }
+        Check(
+            !alexEntry.contains("tool_permissions") && !alexEntry.contains("can_message"),
+            "list_agents: a caller without update_agent does not see other agents' permissions");
+    }
+}
+
 void TestStartChatAndListMyChatsTools() {
     Database db;
     db.Open(L":memory:");
@@ -1695,6 +1773,7 @@ int main() {
     TestToolPermissionEnforcement();
     TestRememberTool();
     TestListAgentsTool();
+    TestListAgentsToolExposesPermissionsToUpdateAgentHolder();
     TestStartChatAndListMyChatsTools();
     TestRequestAddAgentToChatTool();
     TestMentions();

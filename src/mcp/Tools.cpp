@@ -263,17 +263,50 @@ json Remember(ToolContext& ctx, const json& arguments, std::string& outError) {
 }
 
 json ListAgents(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
+    // tool_permissions/can_message are only useful to a caller that could
+    // actually act on them — i.e. one that itself holds update_agent (the
+    // only tool that can change another agent's permissions). Everyone else
+    // gets the same id/name/description this always returned. Without this,
+    // an agent asked to grant another agent a permission has no way to see
+    // what that agent already has, and update_agent replaces the whole
+    // array rather than merging — a real gap that showed up live: Alex
+    // correctly refused to guess rather than risk wiping out an agent's
+    // existing permissions when asked to grant a new one.
+    Agent caller;
+    bool showPermissions = false;
+    if (ctx.agentStore.Get(ctx.agentId, caller)) {
+        try {
+            const json callerPerms = json::parse(caller.toolPermissionsJson);
+            showPermissions = callerPerms.is_array() &&
+                               std::find(callerPerms.begin(), callerPerms.end(), "update_agent") != callerPerms.end();
+        } catch (const json::parse_error&) {
+        }
+    }
+
     const std::vector<Agent> agents = ctx.agentStore.ListAll();
     json out = json::array();
     for (const Agent& agent : agents) {
         if (agent.status != "active") {
             continue;
         }
-        out.push_back({
+        json entry{
             {"id", agent.id},
             {"name", agent.name},
             {"description", agent.description},
-        });
+        };
+        if (showPermissions) {
+            try {
+                entry["tool_permissions"] = json::parse(agent.toolPermissionsJson);
+            } catch (const json::parse_error&) {
+                entry["tool_permissions"] = json::array();
+            }
+            try {
+                entry["can_message"] = json::parse(agent.canMessageJson);
+            } catch (const json::parse_error&) {
+                entry["can_message"] = json::array();
+            }
+        }
+        out.push_back(entry);
     }
     return out;
 }
@@ -659,7 +692,10 @@ json Tools::Definitions() {
             {"description",
              "List every currently active agent (id, name, one-line description). Use this to check "
              "what already exists before proposing a new agent, so you don't create something that "
-             "duplicates or overlaps an existing one."},
+             "duplicates or overlaps an existing one. If you yourself hold update_agent, each entry "
+             "also includes that agent's current tool_permissions and can_message — check this before "
+             "calling update_agent to change another agent's permissions, since update_agent replaces "
+             "the whole array rather than merging into it."},
             {"inputSchema",
              {
                  {"type", "object"},
