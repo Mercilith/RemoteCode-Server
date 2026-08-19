@@ -36,15 +36,12 @@ using DiscordReactionHandler =
 using SlashCommandAddRepoHandler =
     std::function<void(const std::string& url, const std::string& notes)>;
 
-// The five chat-lifecycle slash commands below are all pure bookkeeping (DB
-// writes plus at most one Discord REST call — channel create/delete or a
-// permission-overwrite edit), never an agent turn, so unlike add-repo's
-// "ack now, do the slow part later" pattern, create-chat/create-dm/
-// add-agent/remove-agent run synchronously and reply with the real result
+// create-chat/add-agent/remove-agent are pure bookkeeping (DB writes plus at
+// most one Discord REST call — channel create or a permission-overwrite
+// edit), never an agent turn, so unlike add-repo's "ack now, do the slow
+// part later" pattern, they run synchronously and reply with the real result
 // (matching the existing synchronous-REST-call precedent already used by
-// CreateDmChannel/EnsureWebhook/AddReaction below). close-chat is the one
-// exception — see its handler's own comment for why it stays fire-and-forget
-// like add-repo.
+// CreateDmChannel/EnsureWebhook/AddReaction below).
 //
 // `agentsRaw`/`agentRaw` are the raw space-or-comma-separated agent name/id
 // list from the slash command's string option — dpp has no good multi-select
@@ -52,15 +49,22 @@ using SlashCommandAddRepoHandler =
 // handler side (Orchestrator), not here.
 using SlashCommandCreateChatHandler =
     std::function<std::string(const std::string& agentsRaw, const std::string& title)>;
-using SlashCommandCreateDmHandler = std::function<std::string(const std::string& agentRaw)>;
 using SlashCommandAddAgentHandler =
     std::function<std::string(const std::string& channelId, const std::string& agentRaw)>;
 using SlashCommandRemoveAgentHandler =
     std::function<std::string(const std::string& channelId, const std::string& agentRaw)>;
-// void, not std::string — see the comment above and the handler's own
-// comment in Orchestrator.cpp: replying into a channel this call is about to
-// delete has to happen strictly before the delete, so this can't be a
-// simple synchronous "compute the reply text" callback like the other four.
+// void, not std::string — see the handlers' own comments in Orchestrator.cpp:
+// both of these may need to delete a Discord channel (close-chat always;
+// create-dm when retiring a previous DM before starting a fresh one), and
+// that delete has to happen strictly after this interaction's ack, not
+// before a synchronous reply is computed — otherwise a slow/rate-limited
+// delete call risks missing Discord's 3-second ack window ("The application
+// didn't respond"). `invokingChannelId` lets the handler report failures
+// (unknown agent, channel-create failure) back into wherever the command was
+// actually run from, since there's no synchronous return value to carry that
+// text anymore.
+using SlashCommandCreateDmHandler =
+    std::function<void(const std::string& agentRaw, const std::string& invokingChannelId)>;
 using SlashCommandCloseChatHandler = std::function<void(const std::string& channelId)>;
 
 // /create-workspace — `reposRaw` is the raw space/comma-separated repo

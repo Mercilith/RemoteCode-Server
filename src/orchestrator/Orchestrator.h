@@ -77,7 +77,7 @@ public:
     // (see mcp/Tools.cpp's MessageUser) so a DM opened this way and one an
     // agent opens via message_user are always the same chat, never
     // duplicated.
-    std::string HandleSlashCommandCreateDm(const std::string& agentRaw);
+    void HandleSlashCommandCreateDm(const std::string& agentRaw, const std::string& invokingChannelId);
     // Adds one agent to the chat backing `channelId`. Grants the agent's own
     // bot explicit channel access if it has one (the channel may already
     // exist from before this agent joined).

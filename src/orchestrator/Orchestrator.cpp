@@ -267,7 +267,15 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         return HandleSlashCommandCreateChat(agentsRaw, title);
     });
     discordBot_->SetSlashCommandCreateDmHandler(
-        [this](const std::string& agentRaw) { return HandleSlashCommandCreateDm(agentRaw); });
+        [this](const std::string& agentRaw, const std::string& invokingChannelId) {
+            // Detached, same as add-repo/close-chat above — may need to
+            // delete a Discord channel, which has to happen strictly after
+            // the ack DiscordBot::HandleSlashCommand already sent, not
+            // before a synchronous reply is computed.
+            std::thread([this, agentRaw, invokingChannelId]() {
+                HandleSlashCommandCreateDm(agentRaw, invokingChannelId);
+            }).detach();
+        });
     discordBot_->SetSlashCommandAddAgentHandler(
         [this](const std::string& channelId, const std::string& agentRaw) {
             return HandleSlashCommandAddAgent(channelId, agentRaw);
@@ -1245,10 +1253,11 @@ std::string Orchestrator::HandleSlashCommandCreateChat(const std::string& agents
     return "Created a new chat with " + names + ": <#" + channelId + ">";
 }
 
-std::string Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw) {
+void Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw, const std::string& invokingChannelId) {
     Agent agent;
     if (!ResolveActiveAgentByNameOrId(agentRaw, agent)) {
-        return "'" + agentRaw + "' is not a known, active agent.";
+        discordBot_->PostPlain(invokingChannelId, "'" + agentRaw + "' is not a known, active agent.");
+        return;
     }
 
     // /create-dm means "start over" — a genuinely new conversation with
@@ -1257,6 +1266,9 @@ std::string Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw
     // DM with this agent already exists, retire it first: archive the chat
     // and delete its Discord channel, exactly like /close-chat would, so
     // there's never more than one live channel per agent hanging around.
+    // This runs on a detached thread (see the handler wiring in Run()) — the
+    // interaction was already ack'd before this call, so there's no 3-second
+    // window to worry about here.
     Chat previousDm;
     if (chatStore_->GetActiveDmChatForAgent(agent.id, previousDm)) {
         chatStore_->SetChatStatus(previousDm.id, "archived");
@@ -1284,17 +1296,26 @@ std::string Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw
     dmChat.status = "active";
     dmChat.createdAt = static_cast<int64_t>(time(nullptr));
     if (!chatStore_->CreateChat(dmChat)) {
-        return "Failed to create the DM chat (internal error).";
+        discordBot_->PostPlain(invokingChannelId, "Failed to create the DM chat (internal error).");
+        return;
     }
     chatStore_->AddParticipant(dmChatId, "agent", agent.id);
 
     const std::string channelId = EnsureChannelForChat(dmChat);
     if (channelId.empty()) {
-        return "DM chat with '" + agent.name +
-               "' was created, but its Discord channel could not be — check "
-               "discord_owner_user_id/discord_guild_id configuration.";
+        discordBot_->PostPlain(
+            invokingChannelId, "DM chat with '" + agent.name +
+                                    "' was created, but its Discord channel could not be — check "
+                                    "discord_owner_user_id/discord_guild_id configuration.");
+        return;
     }
-    return "Started a fresh DM with " + agent.name + ": <#" + channelId + ">";
+
+    // The confirmation lives in the new channel itself rather than being
+    // relayed back to invokingChannelId — that's correct whether /create-dm
+    // was run from some other channel (they'll see the ack reply there, plus
+    // this as the new DM's opening message) or from within the very DM
+    // being replaced (that channel is gone by the time this runs).
+    discordBot_->PostPlain(channelId, "This is a fresh conversation with " + agent.name + ".");
 }
 
 std::string Orchestrator::HandleSlashCommandAddAgent(const std::string& channelId, const std::string& agentRaw) {

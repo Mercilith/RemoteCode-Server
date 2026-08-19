@@ -90,7 +90,8 @@ void DiscordBot::Run() {
         }
         if (onSlashCommandCreateDm_) {
             dpp::slashcommand createDmCommand(
-                "create-dm", "Open (or reuse) your private DM with a single agent.", bot_->me.id);
+                "create-dm", "Start a fresh, private DM with a single agent (retires any existing one).",
+                bot_->me.id);
             createDmCommand.add_option(
                 dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
             bot_->global_command_create(createDmCommand);
@@ -242,7 +243,13 @@ void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
 
     if (name == "create-dm" && onSlashCommandCreateDm_) {
         const std::string agent = GetStringParam(event, "agent");
-        event.reply(onSlashCommandCreateDm_(agent));
+        const std::string invokingChannelId = std::to_string(event.command.channel_id);
+        // Ack first, same reasoning as close-chat below — this may delete a
+        // previous DM channel, and that REST call (plus the one to create
+        // the new channel) can be slow enough to blow Discord's 3-second ack
+        // window if it ran before the reply.
+        event.reply("Starting a fresh DM \xE2\x80\x94 I'll update you there once it's ready.");
+        onSlashCommandCreateDm_(agent, invokingChannelId);
         return;
     }
 
