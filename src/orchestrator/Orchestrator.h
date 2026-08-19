@@ -13,6 +13,8 @@
 #include "../db/ChatStore.h"
 #include "../db/ChatSummaryStore.h"
 #include "../db/Database.h"
+#include "../db/PromptTemplateStore.h"
+#include "../db/RepoStore.h"
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
 #include "../http/AdminServer.h"
@@ -46,6 +48,18 @@ public:
     nlohmann::json InjectTestMessage(
         const std::string& chatId, const std::string& content, const std::string& senderId);
 
+    // Parses `githubUrl`, computes the deterministic repo id, and either:
+    //  - if a repo with that id already exists, returns its id as-is
+    //    (idempotent — adding the same repo twice does not re-clone or
+    //    re-onboard it); or
+    //  - inserts a new `repos` row (status "cloning") and kicks off
+    //    cloning+onboarding on a detached background thread, returning the
+    //    new id immediately (does NOT block for the clone to finish).
+    // Returns an empty string and sets outError if `githubUrl` doesn't
+    // parse. Called from both AdminServer's POST /repos and the Discord
+    // `/add-repo` slash command handler.
+    std::string AddRepo(const std::string& githubUrl, const std::string& notes, std::string& outError);
+
 private:
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
     // every active participant agent (the unchanged default for a real
@@ -70,6 +84,17 @@ private:
     // summarizer turn fails; this must never block real dispatch.
     void RefreshChatSummaryIfNeeded(const std::string& chatId);
     void HandleReaction(const std::string& discordMessageId, const std::string& emoji);
+
+    // Runs on the detached background thread AddRepo spawns for `repoId`:
+    // clones the repo (if not already cloned), marks it "ready", creates
+    // the "repo-onboard-<repoId>" chat, renders and posts the
+    // "repo_onboarding_alex" template into it, then runs Alex's turn
+    // synchronously (HandleIncomingMessage) so Alex can propose the new
+    // repo-expert agent for approval. See the design doc section on the
+    // onboarding pipeline for the full flow (this is only step one of it —
+    // step two, granting tool access and onboarding the new agent itself,
+    // happens in HandleReaction once Cardon approves).
+    void RunRepoOnboarding(const std::string& repoId);
 
     // Posts `content` into `channelId` as `agent` — via `agent`'s own
     // Discord bot if one is configured, otherwise the shared bot's
@@ -108,6 +133,8 @@ private:
     std::unique_ptr<ApprovalStore> approvalStore_;
     std::unique_ptr<AgentSessionStore> agentSessionStore_;
     std::unique_ptr<ChatSummaryStore> chatSummaryStore_;
+    std::unique_ptr<RepoStore> repoStore_;
+    std::unique_ptr<PromptTemplateStore> promptTemplateStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;
     std::unique_ptr<ActivityLog> activityLog_;

@@ -193,6 +193,12 @@ AgentTurnResult AgentTurn::Run(
     request["claudeConfigDir"] = claudeConfigDir;
     request["resumeSessionId"] = resumeSessionId;
     request["tagged"] = tagged;
+    // Non-empty only for a repo-onboarding-created agent (see
+    // AgentStore::SetRepoLocalPath / Orchestrator::HandleReaction) — the
+    // worker uses this to decide whether to grant real file/Bash tool
+    // access scoped to this directory. See worker/src/index.ts for the
+    // real-capability-expansion comment; this is just the plumbing.
+    request["repoLocalPath"] = agent.repoLocalPath;
 
     const std::wstring commandLine = L"node.exe \"" + tsxCliPath + L"\" \"src/index.ts\"";
 

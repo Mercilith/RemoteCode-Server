@@ -27,6 +27,17 @@ struct Agent {
     std::string discordBotTokenEncrypted;
     std::string discordBotUserId;
     std::string discordBotUsername;
+
+    // Local filesystem path this agent is scoped to for real file/Bash tool
+    // access (see AgentTurn::Run / worker/src/index.ts) — set once a repo
+    // onboarding flow's create_agent approval resolves (see
+    // Orchestrator::HandleReaction / RepoStore). Empty means "no repo scope,
+    // no built-in tools" (today's default behavior for every other agent).
+    // Like the bot-token fields above, deliberately excluded from the
+    // generic Upsert and managed only via SetRepoLocalPath, so an unrelated
+    // update_agent/Upsert call can never accidentally grant or revoke real
+    // filesystem/shell access as a side effect.
+    std::string repoLocalPath;
 };
 
 class AgentStore {
@@ -56,6 +67,11 @@ public:
         const std::string& botUsername);
     // Reverts to the shared-webhook posting path.
     bool ClearDiscordBotToken(const std::string& agentId);
+
+    // Grants (or moves) this agent's real file/Bash tool access — see the
+    // repoLocalPath comment above. Not touched by Upsert, same rationale as
+    // the bot-token setters.
+    bool SetRepoLocalPath(const std::string& agentId, const std::string& localPath);
 
     // Durable per-agent facts (design doc Section 7) — small key/value
     // pairs injected into every turn for that agent.

@@ -7,6 +7,8 @@
 #include "../db/AgentSessionStore.h"
 #include "../db/AgentStore.h"
 #include "../db/ChatStore.h"
+#include "../db/PromptTemplateStore.h"
+#include "../db/RepoStore.h"
 #include "../third_party/json.hpp"
 
 namespace httplib {
@@ -18,6 +20,12 @@ class Server;
 // than a back-reference to Orchestrator.
 using InjectMessageFn = std::function<nlohmann::json(
     const std::string& chatId, const std::string& content, const std::string& senderId)>;
+
+// Callback into Orchestrator::AddRepo — same rationale as InjectMessageFn
+// above. Returns the new (or existing, if idempotent) repo id, or an empty
+// string with outError set if githubUrl didn't parse.
+using AddRepoFn = std::function<std::string(
+    const std::string& githubUrl, const std::string& notes, std::string& outError)>;
 
 // Local-only (127.0.0.1) HTTP admin API for RemoteCode-Desktop: list/
 // create/update agents, assign or clear a per-agent Discord bot token, and
@@ -41,8 +49,9 @@ public:
     // AdminServer as a member).
     AdminServer(
         AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
-        std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
-        InjectMessageFn injectMessage);
+        RepoStore& repoStore, PromptTemplateStore& promptTemplateStore, std::wstring dbPath,
+        std::string claudeConfigDir, std::wstring logDir, InjectMessageFn injectMessage,
+        AddRepoFn addRepo);
     ~AdminServer();
 
     AdminServer(const AdminServer&) = delete;
@@ -56,10 +65,13 @@ private:
     AgentStore& agentStore_;
     AgentSessionStore& agentSessionStore_;
     ChatStore& chatStore_;
+    RepoStore& repoStore_;
+    PromptTemplateStore& promptTemplateStore_;
     std::wstring dbPath_;
     std::string claudeConfigDir_;
     std::wstring logDir_;
     InjectMessageFn injectMessage_;
+    AddRepoFn addRepo_;
     std::unique_ptr<httplib::Server> server_;
 };
 

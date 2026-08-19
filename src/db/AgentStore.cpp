@@ -33,7 +33,7 @@ constexpr const char* kAlexSystemPrompt =
 // built in a parallel branch), and listing an unimplemented tool here would
 // silently permit nothing since Tools::Call would still reject the name.
 constexpr const char* kAlexToolPermissionsJson =
-    R"(["post_message","read_chat","message_user","submit_agent_for_approval","update_agent","remember","list_agents","list_my_chats","start_chat"])";
+    R"(["post_message","read_chat","message_user","submit_agent_for_approval","update_agent","remember","list_agents","list_my_chats","start_chat","get_prompt_template","update_prompt_template"])";
 constexpr const char* kAlexCanMessageJson = R"(["*"])";
 
 } // namespace
@@ -71,7 +71,8 @@ namespace {
 
 constexpr const char* kAgentColumns =
     "id, name, description, system_prompt, status, tool_permissions, can_message, created_by, "
-    "created_at, updated_at, discord_bot_token_encrypted, discord_bot_user_id, discord_bot_username";
+    "created_at, updated_at, discord_bot_token_encrypted, discord_bot_user_id, discord_bot_username, "
+    "repo_local_path";
 
 void ReadAgentRow(const Statement& stmt, Agent& out) {
     out.id = stmt.ColumnText(0);
@@ -87,6 +88,7 @@ void ReadAgentRow(const Statement& stmt, Agent& out) {
     out.discordBotTokenEncrypted = stmt.ColumnIsNull(10) ? "" : stmt.ColumnText(10);
     out.discordBotUserId = stmt.ColumnIsNull(11) ? "" : stmt.ColumnText(11);
     out.discordBotUsername = stmt.ColumnIsNull(12) ? "" : stmt.ColumnText(12);
+    out.repoLocalPath = stmt.ColumnIsNull(13) ? "" : stmt.ColumnText(13);
 }
 
 } // namespace
@@ -177,6 +179,22 @@ bool AgentStore::ClearDiscordBotToken(const std::string& agentId) {
     }
     stmt.BindInt64(1, NowUnix());
     stmt.BindText(2, agentId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool AgentStore::SetRepoLocalPath(const std::string& agentId, const std::string& localPath) {
+    Statement stmt(db_, "UPDATE agents SET repo_local_path = ?1, updated_at = ?2 WHERE id = ?3;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    if (localPath.empty()) {
+        stmt.BindNull(1);
+    } else {
+        stmt.BindText(1, localPath);
+    }
+    stmt.BindInt64(2, NowUnix());
+    stmt.BindText(3, agentId);
     stmt.Step();
     return stmt.Ok();
 }

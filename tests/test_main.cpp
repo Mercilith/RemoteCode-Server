@@ -8,11 +8,14 @@
 #include "../src/db/ChatStore.h"
 #include "../src/db/ChatSummaryStore.h"
 #include "../src/db/Database.h"
+#include "../src/db/PromptTemplateStore.h"
+#include "../src/db/RepoStore.h"
 #include "../src/db/Schema.h"
 #include "../src/greeting.h"
 #include "../src/mcp/McpServer.h"
 #include "../src/third_party/json.hpp"
 #include "../src/util/ActivityLog.h"
+#include "../src/util/GitHubRepo.h"
 #include "../src/util/Mentions.h"
 
 using nlohmann::json;
@@ -399,6 +402,7 @@ void TestMcpServer() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -410,7 +414,7 @@ void TestMcpServer() {
     SeedTestAgent(agentStore, "alex", {"post_message", "read_chat"});
 
     ActivityLog activityLog(L"test-logs", "test-mcp");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
     Check(
@@ -423,7 +427,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 9, "McpServer: tools/list returns exactly 9 tools");
+    Check(tools.is_array() && tools.size() == 11, "McpServer: tools/list returns exactly 11 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -476,6 +480,7 @@ void TestApprovalWorkflowTool() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -487,7 +492,7 @@ void TestApprovalWorkflowTool() {
     SeedTestAgent(agentStore, "alex", {"submit_agent_for_approval"});
 
     ActivityLog activityLog(L"test-logs", "test-approval");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string submitCall = json{
         {"jsonrpc", "2.0"},
@@ -541,6 +546,7 @@ void TestMessageUserTool() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -552,7 +558,7 @@ void TestMessageUserTool() {
     SeedTestAgent(agentStore, "alex", {"message_user"});
 
     ActivityLog activityLog(L"test-logs", "test-message-user");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string messageUserCall = json{
         {"jsonrpc", "2.0"},
@@ -592,6 +598,7 @@ void TestUpdateAgentTool() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     Agent target;
     target.id = "target-agent";
@@ -608,7 +615,7 @@ void TestUpdateAgentTool() {
     SeedTestAgent(agentStore, "alex", {"update_agent"});
 
     ActivityLog activityLog(L"test-logs", "test-update");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string updateCall = json{
         {"jsonrpc", "2.0"},
@@ -649,6 +656,7 @@ void TestToolPermissionEnforcement() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -662,7 +670,7 @@ void TestToolPermissionEnforcement() {
     SeedTestAgent(agentStore, "alex", {});
 
     ActivityLog activityLog(L"test-logs", "test-permission-denied");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string postCall = json{
         {"jsonrpc", "2.0"},
@@ -686,7 +694,8 @@ void TestToolPermissionEnforcement() {
 
     // Unknown agent id (no row at all) must also fail closed, not crash.
     ActivityLog activityLog2(L"test-logs", "test-permission-unknown-agent");
-    McpServer serverUnknownAgent(chatStore, agentStore, approvalStore, activityLog2, "nobody", "chat-1");
+    McpServer serverUnknownAgent(
+        chatStore, agentStore, approvalStore, promptTemplateStore, activityLog2, "nobody", "chat-1");
     const json unknownAgentResponse = json::parse(serverUnknownAgent.HandleLine(postCall));
     Check(
         unknownAgentResponse["result"]["isError"] == true,
@@ -700,10 +709,11 @@ void TestRememberTool() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
     SeedTestAgent(agentStore, "alex", {"remember"});
 
     ActivityLog activityLog(L"test-logs", "test-remember");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string rememberCall = json{
         {"jsonrpc", "2.0"},
@@ -729,6 +739,7 @@ void TestListAgentsTool() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
     SeedTestAgent(agentStore, "alex", {"list_agents"});
 
     Agent disabled;
@@ -745,7 +756,7 @@ void TestListAgentsTool() {
     agentStore.Upsert(disabled);
 
     ActivityLog activityLog(L"test-logs", "test-list-agents");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     const std::string listCall = json{
         {"jsonrpc", "2.0"},
@@ -769,6 +780,7 @@ void TestStartChatAndListMyChatsTools() {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
 
     // Seed the calling agent (alex) plus two targets, one alex is allowed to
     // message and one it isn't — start_chat's can_message check needs real
@@ -835,7 +847,7 @@ void TestStartChatAndListMyChatsTools() {
     agentStore.Upsert(alexNoCharlie);
 
     ActivityLog activityLog(L"test-logs", "test-start-chat");
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, "alex", "chat-1");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
 
     // can_message rejection path: charlie isn't in alex's can_message.
     const std::string rejectedCall = json{
@@ -981,6 +993,207 @@ void TestMentions() {
         "Mentions::IsAllowedToMessage fails closed on malformed can_message JSON");
 }
 
+void TestGitHubRepoParseGitHubUrl() {
+    std::string org, repo;
+
+    Check(
+        GitHubRepo::ParseGitHubUrl("https://github.com/foo/bar", org, repo) && org == "foo" && repo == "bar",
+        "GitHubRepo::ParseGitHubUrl accepts https://github.com/org/repo");
+
+    Check(
+        GitHubRepo::ParseGitHubUrl("https://github.com/foo/bar.git", org, repo) && org == "foo" && repo == "bar",
+        "GitHubRepo::ParseGitHubUrl strips a trailing .git");
+
+    Check(
+        GitHubRepo::ParseGitHubUrl("git@github.com:foo/bar.git", org, repo) && org == "foo" && repo == "bar",
+        "GitHubRepo::ParseGitHubUrl accepts the git@github.com:org/repo.git SSH form");
+
+    Check(
+        GitHubRepo::ParseGitHubUrl("foo/bar", org, repo) && org == "foo" && repo == "bar",
+        "GitHubRepo::ParseGitHubUrl accepts the bare org/repo form");
+
+    Check(
+        GitHubRepo::ParseGitHubUrl("https://github.com/foo/bar/", org, repo) && org == "foo" && repo == "bar",
+        "GitHubRepo::ParseGitHubUrl tolerates a trailing slash");
+
+    Check(
+        !GitHubRepo::ParseGitHubUrl("https://github.com/foo", org, repo),
+        "GitHubRepo::ParseGitHubUrl rejects a URL missing the repo segment");
+
+    Check(
+        !GitHubRepo::ParseGitHubUrl("https://github.com/foo/bar/tree/main", org, repo),
+        "GitHubRepo::ParseGitHubUrl rejects an URL with extra path segments beyond org/repo");
+
+    Check(
+        !GitHubRepo::ParseGitHubUrl("https://gitlab.com/foo/bar", org, repo),
+        "GitHubRepo::ParseGitHubUrl rejects a non-GitHub host");
+
+    Check(
+        !GitHubRepo::ParseGitHubUrl("not a url at all", org, repo),
+        "GitHubRepo::ParseGitHubUrl rejects garbage input");
+
+    Check(
+        GitHubRepo::RepoId("Some-Org", "Some Repo!") == "some-org__some-repo",
+        "GitHubRepo::RepoId slugifies and joins org/repo with a double underscore");
+}
+
+void TestRepoStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    RepoStore store(db);
+
+    Repo missing;
+    Check(!store.Get("no-such-repo", missing), "RepoStore: Get returns false for an unknown id");
+
+    Repo repo;
+    repo.id = "acme__widgets";
+    repo.githubUrl = "https://github.com/acme/widgets";
+    repo.localPath = "C:\\ProgramData\\RemoteCode\\Repos\\acme__widgets";
+    repo.status = "cloning";
+    repo.notes = "focus on the parser";
+    repo.createdAt = 1;
+    repo.updatedAt = 1;
+    Check(store.Create(repo), "RepoStore: Create succeeds");
+
+    Repo fetched;
+    Check(store.Get("acme__widgets", fetched), "RepoStore: Get finds the created repo");
+    Check(
+        fetched.githubUrl == repo.githubUrl && fetched.localPath == repo.localPath &&
+            fetched.notes == repo.notes && fetched.status == "cloning" && fetched.agentId.empty() &&
+            fetched.lastError.empty(),
+        "RepoStore: round-tripped fields match, agent_id/last_error empty by default");
+
+    Check(store.SetStatus("acme__widgets", "ready", 2), "RepoStore: SetStatus succeeds");
+    Repo afterStatus;
+    store.Get("acme__widgets", afterStatus);
+    Check(
+        afterStatus.status == "ready" && afterStatus.updatedAt == 2,
+        "RepoStore: SetStatus updates status and updated_at");
+
+    Check(store.SetAgentId("acme__widgets", "widgets-expert", 3), "RepoStore: SetAgentId succeeds");
+    Repo afterAgent;
+    store.Get("acme__widgets", afterAgent);
+    Check(afterAgent.agentId == "widgets-expert", "RepoStore: SetAgentId round-trips");
+
+    Check(store.SetError("acme__widgets", "gh: repository not found", 4), "RepoStore: SetError succeeds");
+    Repo afterError;
+    store.Get("acme__widgets", afterError);
+    Check(
+        afterError.status == "failed" && afterError.lastError == "gh: repository not found",
+        "RepoStore: SetError also sets status to 'failed'");
+
+    Check(store.Create(Repo{"other__repo", "https://github.com/other/repo", "C:\\x", "", "cloning", "", "", 5, 5}),
+        "RepoStore: Create a second repo");
+    const std::vector<Repo> all = store.ListAll();
+    Check(all.size() == 2, "RepoStore: ListAll returns every repo");
+}
+
+void TestPromptTemplateStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    PromptTemplateStore store(db);
+
+    std::string missing;
+    Check(!store.Get("repo_onboarding_alex", missing), "PromptTemplateStore: Get is empty before seeding");
+
+    Check(store.SeedDefaultsIfEmpty(), "PromptTemplateStore: SeedDefaultsIfEmpty succeeds");
+
+    std::string alexContent;
+    Check(
+        store.Get(PromptTemplateNames::kRepoOnboardingAlex, alexContent) && !alexContent.empty(),
+        "PromptTemplateStore: seeding populates repo_onboarding_alex");
+    std::string agentContent;
+    Check(
+        store.Get(PromptTemplateNames::kRepoOnboardingAgent, agentContent) && !agentContent.empty(),
+        "PromptTemplateStore: seeding populates repo_onboarding_agent");
+
+    // Idempotent: calling again after an explicit edit must not clobber it.
+    Check(store.Set(PromptTemplateNames::kRepoOnboardingAlex, "edited content", 99), "PromptTemplateStore: Set succeeds");
+    Check(store.SeedDefaultsIfEmpty(), "PromptTemplateStore: SeedDefaultsIfEmpty is a no-op once non-empty");
+    std::string afterReseed;
+    store.Get(PromptTemplateNames::kRepoOnboardingAlex, afterReseed);
+    Check(afterReseed == "edited content", "PromptTemplateStore: SeedDefaultsIfEmpty does not overwrite an edit");
+
+    Check(store.ListAll().size() == 2, "PromptTemplateStore: ListAll returns both seeded templates");
+
+    const std::string rendered = RenderPromptTemplate(
+        "Repo {{repo_name}} at {{repo_url}} lives at {{local_path}}.{{notes}}", "acme/widgets",
+        "https://github.com/acme/widgets", "C:\\repos\\widgets", "focus on parsing");
+    Check(
+        rendered ==
+            "Repo acme/widgets at https://github.com/acme/widgets lives at C:\\repos\\widgets.\n"
+            "Cardon's notes: focus on parsing\n",
+        "RenderPromptTemplate substitutes all four placeholders with notes present");
+
+    const std::string renderedNoNotes = RenderPromptTemplate(
+        "{{repo_name}}/{{repo_url}}/{{local_path}}/{{notes}}/end", "n", "u", "p", "");
+    Check(
+        renderedNoNotes == "n/u/p//end", "RenderPromptTemplate substitutes an empty string when notes is empty");
+}
+
+void TestPromptTemplateMcpTools() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    promptTemplateStore.SeedDefaultsIfEmpty();
+    SeedTestAgent(agentStore, "alex", {"get_prompt_template", "update_prompt_template"});
+
+    ActivityLog activityLog(L"test-logs", "test-prompt-templates");
+    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+
+    const std::string getCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "get_prompt_template"}, {"arguments", {{"name", "repo_onboarding_alex"}}}}},
+    }.dump();
+    const json getResponse = json::parse(server.HandleLine(getCall));
+    Check(getResponse["result"]["isError"] == false, "get_prompt_template succeeds for a known name");
+    const json getResult = json::parse(getResponse["result"]["content"][0]["text"].get<std::string>());
+    Check(!getResult.value("content", "").empty(), "get_prompt_template returns non-empty content");
+
+    const std::string getUnknownCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "get_prompt_template"}, {"arguments", {{"name", "not_a_real_template"}}}}},
+    }.dump();
+    const json getUnknownResponse = json::parse(server.HandleLine(getUnknownCall));
+    Check(getUnknownResponse["result"]["isError"] == true, "get_prompt_template rejects an unknown name");
+
+    const std::string updateCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "update_prompt_template"},
+          {"arguments", {{"name", "repo_onboarding_agent"}, {"content", "new content here"}}}}},
+    }.dump();
+    const json updateResponse = json::parse(server.HandleLine(updateCall));
+    Check(updateResponse["result"]["isError"] == false, "update_prompt_template succeeds for a known name");
+
+    std::string persisted;
+    Check(
+        promptTemplateStore.Get("repo_onboarding_agent", persisted) && persisted == "new content here",
+        "update_prompt_template actually persisted the new content");
+
+    const std::string updateUnknownCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 4},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "update_prompt_template"}, {"arguments", {{"name", "made_up"}, {"content", "x"}}}}},
+    }.dump();
+    const json updateUnknownResponse = json::parse(server.HandleLine(updateUnknownCall));
+    Check(updateUnknownResponse["result"]["isError"] == true, "update_prompt_template rejects an unknown name");
+}
+
 } // namespace
 
 int main() {
@@ -1001,6 +1214,10 @@ int main() {
     TestListAgentsTool();
     TestStartChatAndListMyChatsTools();
     TestMentions();
+    TestGitHubRepoParseGitHubUrl();
+    TestRepoStore();
+    TestPromptTemplateStore();
+    TestPromptTemplateMcpTools();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;

@@ -13,6 +13,7 @@ namespace dpp {
 class cluster;
 struct message_create_t;
 struct message_reaction_add_t;
+struct slashcommand_t;
 } // namespace dpp
 
 // Called after an incoming Discord message has been written to the
@@ -25,6 +26,14 @@ using DiscordLogHandler = std::function<void(const std::string& message)>;
 // the approval workflow). Runs on DPP's own event thread.
 using DiscordReactionHandler =
     std::function<void(const std::string& discordMessageId, const std::string& emoji)>;
+// Called when a user invokes the `/add-repo` slash command — `url` is the
+// required "url" option, `notes` the optional "notes" option (empty if not
+// given). Runs on DPP's own event thread, same as the other handlers; the
+// handler itself is expected to ack the interaction immediately (Discord's
+// 3-second window) and hand any real work off to a detached thread — see
+// Orchestrator::Run's wiring.
+using SlashCommandAddRepoHandler =
+    std::function<void(const std::string& url, const std::string& notes)>;
 
 // Thin DPP wrapper: gateway connect, message handler (writes into
 // ChatStore), and a webhook-based post helper so each agent can appear
@@ -47,6 +56,10 @@ public:
     // completely silently.
     void SetLogHandler(DiscordLogHandler handler);
     void SetReactionHandler(DiscordReactionHandler handler);
+    // Registers /add-repo as a global slash command on connect (on_ready)
+    // and dispatches invocations here. No-op (never registers/dispatches)
+    // if never called — matches the pattern of the other optional handlers.
+    void SetSlashCommandAddRepoHandler(SlashCommandAddRepoHandler handler);
 
     // Connects to the Gateway and blocks until Stop() is called. Intended
     // to be run on its own thread by Orchestrator.
@@ -99,6 +112,7 @@ public:
 private:
     void HandleMessageCreate(const dpp::message_create_t& event);
     void HandleReactionAdd(const dpp::message_reaction_add_t& event);
+    void HandleSlashCommand(const dpp::slashcommand_t& event);
     bool EnsureWebhook(
         const std::string& channelId, const std::string& agentId, const std::string& agentName,
         std::string& outWebhookId, std::string& outWebhookToken);
@@ -109,6 +123,7 @@ private:
     IncomingMessageHandler onIncomingMessage_;
     DiscordLogHandler onLog_;
     DiscordReactionHandler onReaction_;
+    SlashCommandAddRepoHandler onSlashCommandAddRepo_;
     // Guards bot_ against a race between Run() reassigning it (fresh
     // cluster per (re)connect) and IsZombied() reading it from the
     // watchdog's own timer thread. Other members' cross-thread use of bot_

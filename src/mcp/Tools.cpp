@@ -364,6 +364,54 @@ json StartChat(ToolContext& ctx, const json& arguments, std::string& outError) {
     return json{{"chat_id", chatId}, {"status", "created"}};
 }
 
+// The only two template names this tool surface allows viewing/editing —
+// deliberately not open to arbitrary new names (see PromptTemplateNames in
+// db/PromptTemplateStore.h, the single source of truth both this file and
+// the admin API check against).
+bool IsKnownTemplateName(const std::string& name) {
+    return name == PromptTemplateNames::kRepoOnboardingAlex || name == PromptTemplateNames::kRepoOnboardingAgent;
+}
+
+json GetPromptTemplate(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("name")) {
+        outError = "get_prompt_template requires 'name'";
+        return {};
+    }
+    const std::string name = arguments["name"].get<std::string>();
+    if (!IsKnownTemplateName(name)) {
+        outError = "unknown prompt template '" + name + "' — valid names are '" +
+                    std::string(PromptTemplateNames::kRepoOnboardingAlex) + "' and '" +
+                    PromptTemplateNames::kRepoOnboardingAgent + "'";
+        return {};
+    }
+    std::string content;
+    if (!ctx.promptTemplateStore.Get(name, content)) {
+        outError = "no stored content for prompt template '" + name + "'";
+        return {};
+    }
+    return json{{"name", name}, {"content", content}};
+}
+
+json UpdatePromptTemplate(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("name") || !arguments.contains("content")) {
+        outError = "update_prompt_template requires 'name' and 'content'";
+        return {};
+    }
+    const std::string name = arguments["name"].get<std::string>();
+    if (!IsKnownTemplateName(name)) {
+        outError = "unknown prompt template '" + name + "' — valid names are '" +
+                    std::string(PromptTemplateNames::kRepoOnboardingAlex) + "' and '" +
+                    PromptTemplateNames::kRepoOnboardingAgent + "'";
+        return {};
+    }
+    const std::string content = arguments["content"].get<std::string>();
+    if (!ctx.promptTemplateStore.Set(name, content, static_cast<int64_t>(time(nullptr)))) {
+        outError = "failed to save prompt template '" + name + "'";
+        return {};
+    }
+    return json{{"name", name}, {"content", content}};
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -516,6 +564,38 @@ json Tools::Definitions() {
                  {"required", json::array({"participant_ids", "initial_message"})},
              }},
         },
+        {
+            {"name", "get_prompt_template"},
+            {"description",
+             "Read one of the two built-in, server-authored repo-onboarding prompt templates by name "
+             "('repo_onboarding_alex' or 'repo_onboarding_agent') — the prompts sent to design/onboard a "
+             "new repo-expert agent. Useful to check current wording before proposing an edit."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"name", {{"type", "string"}}}}},
+                 {"required", json::array({"name"})},
+             }},
+        },
+        {
+            {"name", "update_prompt_template"},
+            {"description",
+             "Edit one of the two built-in repo-onboarding prompt templates ('repo_onboarding_alex' or "
+             "'repo_onboarding_agent'). Rejected for any other name — this cannot create new templates, "
+             "only edit the two that already exist. Keep the {{repo_name}}, {{repo_url}}, "
+             "{{local_path}}, {{notes}} placeholders intact unless you mean to change how the pipeline "
+             "fills them in."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"name", {{"type", "string"}}},
+                      {"content", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"name", "content"})},
+             }},
+        },
     });
 }
 
@@ -589,6 +669,10 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = ListMyChats(ctx, arguments, outError);
     } else if (toolName == "start_chat") {
         result = StartChat(ctx, arguments, outError);
+    } else if (toolName == "get_prompt_template") {
+        result = GetPromptTemplate(ctx, arguments, outError);
+    } else if (toolName == "update_prompt_template") {
+        result = UpdatePromptTemplate(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }

@@ -5,6 +5,7 @@
 #include "../db/AgentStore.h"
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
+#include "../db/PromptTemplateStore.h"
 #include "../util/ActivityLog.h"
 
 // Hand-rolled MCP server (stdio transport, JSON-RPC 2.0, one message per
@@ -15,8 +16,9 @@
 class McpServer {
 public:
     McpServer(
-        ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore, ActivityLog& activityLog,
-        std::string agentId, std::string chatId);
+        ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore,
+        PromptTemplateStore& promptTemplateStore, ActivityLog& activityLog, std::string agentId,
+        std::string chatId);
 
     // Processes one JSON-RPC message (a single line, no trailing newline)
     // and returns the response line to write back, or an empty string if
@@ -31,6 +33,7 @@ private:
     ChatStore& chatStore_;
     AgentStore& agentStore_;
     ApprovalStore& approvalStore_;
+    PromptTemplateStore& promptTemplateStore_;
     ActivityLog& activityLog_;
     std::string agentId_;
     std::string chatId_;
