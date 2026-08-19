@@ -78,6 +78,8 @@ add_executable(RemoteCodeServer
     src/db/ApprovalStore.cpp
     src/db/AgentSessionStore.cpp
     src/db/ChatSummaryStore.cpp
+    src/db/RepoStore.cpp
+    src/db/PromptTemplateStore.cpp
     src/config/ServerConfig.cpp
     src/config/Secrets.cpp
     src/discord/DiscordBot.cpp
@@ -88,6 +90,8 @@ add_executable(RemoteCodeServer
     src/util/Text.cpp
     src/util/ActivityLog.cpp
     src/util/Mentions.cpp
+    src/util/GitHubRepo.cpp
+    src/util/ProcessRunner.cpp
     src/orchestrator/AgentTurn.cpp
     src/orchestrator/Orchestrator.cpp
 )

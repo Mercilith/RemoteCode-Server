@@ -15,7 +15,9 @@
 #include "../config/ServerConfig.h"
 #include "../db/Schema.h"
 #include "../third_party/json.hpp"
+#include "../util/GitHubRepo.h"
 #include "../util/Mentions.h"
+#include "../util/ProcessRunner.h"
 #include "../util/Text.h"
 #include "AgentTurn.h"
 
@@ -29,6 +31,22 @@ namespace {
 // hand-written error strings) — a byte-for-byte widen is exact.
 std::wstring AsciiToWide(const std::string& s) {
     return std::wstring(s.begin(), s.end());
+}
+
+// Real UTF-8 conversion (unlike AsciiToWide above) — needed for
+// RepoLocalPath, which is built from %ProgramData% (via
+// SHGetKnownFolderPath) and can in principle contain non-ASCII characters on
+// a non-English Windows install.
+std::string WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) {
+        return {};
+    }
+    const int size =
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+    std::string result(size, '\0');
+    WideCharToMultiByte(
+        CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), result.data(), size, nullptr, nullptr);
+    return result;
 }
 
 // Used to decide whether an untagged agent's turn actually said something
@@ -77,6 +95,26 @@ std::wstring DbPath() {
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir + L"\\orchestrator.db";
+}
+
+// %ProgramData%\RemoteCode\Repos\<repoId> — mirrors DbPath()'s
+// SHGetKnownFolderPath(FOLDERID_ProgramData) + create_directories pattern.
+// Returns an empty wstring if %ProgramData% can't be resolved.
+std::wstring RepoLocalPath(const std::string& repoId) {
+    PWSTR programData = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &programData)) ||
+        programData == nullptr) {
+        if (programData != nullptr) {
+            CoTaskMemFree(programData);
+        }
+        return L"";
+    }
+    const std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\Repos\\" + AsciiToWide(repoId);
+    CoTaskMemFree(programData);
+
+    std::error_code ec;
+    fs::create_directories(fs::path(dir).parent_path(), ec); // ensure ...\Repos\ exists; the repo dir itself is gh's job (or already exists)
+    return dir;
 }
 
 // Discord's actual UTF-8 bytes for the two reaction emoji this pass's
@@ -130,7 +168,10 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     approvalStore_ = std::make_unique<ApprovalStore>(*db_);
     agentSessionStore_ = std::make_unique<AgentSessionStore>(*db_);
     chatSummaryStore_ = std::make_unique<ChatSummaryStore>(*db_);
+    repoStore_ = std::make_unique<RepoStore>(*db_);
+    promptTemplateStore_ = std::make_unique<PromptTemplateStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
+    promptTemplateStore_->SeedDefaultsIfEmpty();
 
     // Sits next to the DB file (…\ServerData\logs\) — see util/ActivityLog.
     // Per-turn detail (tool calls, blocked mentions, turn-limit trips) goes
@@ -153,9 +194,13 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // Discord is set up, and /revise degrades gracefully (Alex just can't
     // post anywhere, but can still update the agent record).
     adminServer_ = std::make_unique<AdminServer>(
-        *agentStore_, *agentSessionStore_, *chatStore_, dbPath_, claudeConfigDir_, logDir_,
+        *agentStore_, *agentSessionStore_, *chatStore_, *repoStore_, *promptTemplateStore_, dbPath_,
+        claudeConfigDir_, logDir_,
         [this](const std::string& chatId, const std::string& content, const std::string& senderId) {
             return InjectTestMessage(chatId, content, senderId);
+        },
+        [this](const std::string& githubUrl, const std::string& notes, std::string& outError) {
+            return AddRepo(githubUrl, notes, outError);
         });
     std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
     log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
@@ -180,6 +225,17 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     });
     discordBot_->SetReactionHandler([this](const std::string& discordMessageId, const std::string& emoji) {
         std::thread([this, discordMessageId, emoji]() { HandleReaction(discordMessageId, emoji); }).detach();
+    });
+    discordBot_->SetSlashCommandAddRepoHandler([this](const std::string& url, const std::string& notes) {
+        // Same detached-thread pattern as the handlers above — the reply
+        // ack already happened inside DiscordBot::HandleSlashCommand before
+        // this fires, so there's no 3-second deadline here; AddRepo itself
+        // is fast (just a DB insert) and spawns its own further background
+        // thread for the actual clone+onboarding work.
+        std::thread([this, url, notes]() {
+            std::string error;
+            AddRepo(url, notes, error);
+        }).detach();
     });
 
     // discordBot_->Stop() is the one mechanism used both for a real
@@ -278,6 +334,136 @@ json Orchestrator::InjectTestMessage(
         });
     }
     return json{{"chat_id", chatId}, {"messages", messages}};
+}
+
+std::string Orchestrator::AddRepo(const std::string& githubUrl, const std::string& notes, std::string& outError) {
+    std::string org, repoName;
+    if (!GitHubRepo::ParseGitHubUrl(githubUrl, org, repoName)) {
+        outError = "could not parse '" + githubUrl + "' as a GitHub repo (expected "
+                    "https://github.com/org/repo, git@github.com:org/repo.git, or org/repo)";
+        return "";
+    }
+    const std::string repoId = GitHubRepo::RepoId(org, repoName);
+
+    Repo existing;
+    if (repoStore_->Get(repoId, existing)) {
+        // Idempotent — adding the same repo twice is a no-op past the first
+        // time (no re-clone, no re-onboard).
+        return existing.id;
+    }
+
+    const std::wstring localPath = RepoLocalPath(repoId);
+    if (localPath.empty()) {
+        outError = "could not resolve %ProgramData% to determine the clone destination";
+        return "";
+    }
+
+    Repo repo;
+    repo.id = repoId;
+    repo.githubUrl = githubUrl;
+    repo.localPath = WideToUtf8(localPath);
+    repo.status = "cloning";
+    repo.notes = notes;
+    repo.createdAt = static_cast<int64_t>(time(nullptr));
+    repo.updatedAt = repo.createdAt;
+    if (!repoStore_->Create(repo)) {
+        outError = "failed to save the new repo record";
+        return "";
+    }
+
+    std::thread([this, repoId]() { RunRepoOnboarding(repoId); }).detach();
+    return repoId;
+}
+
+void Orchestrator::RunRepoOnboarding(const std::string& repoId) {
+    Repo repo;
+    if (!repoStore_->Get(repoId, repo)) {
+        log_(L"Orchestrator: RunRepoOnboarding called for unknown repo id '" + AsciiToWide(repoId) + L"'.");
+        return;
+    }
+
+    std::string org, repoName;
+    GitHubRepo::ParseGitHubUrl(repo.githubUrl, org, repoName); // already validated by AddRepo
+    const std::string repoDisplayName = org.empty() || repoName.empty() ? repo.id : (org + "/" + repoName);
+
+    const std::wstring localPathWide = AsciiToWide(repo.localPath);
+    const bool alreadyCloned = fs::exists(fs::path(localPathWide) / L".git");
+    if (!alreadyCloned) {
+        const std::wstring commandLine =
+            L"gh.exe repo clone \"" + AsciiToWide(repoDisplayName) + L"\" \"" + localPathWide + L"\"";
+
+        std::string output;
+        int exitCode = -1;
+        if (!ProcessRunner::RunCommand(commandLine, L"", output, exitCode)) {
+            const std::string error = "failed to launch 'gh repo clone' (is the gh CLI installed and on PATH?)";
+            repoStore_->SetError(repoId, error, static_cast<int64_t>(time(nullptr)));
+            log_(L"Orchestrator: repo clone failed for '" + AsciiToWide(repoId) + L"': " + AsciiToWide(error));
+            return;
+        }
+        if (exitCode != 0) {
+            repoStore_->SetError(repoId, output, static_cast<int64_t>(time(nullptr)));
+            log_(L"Orchestrator: 'gh repo clone' exited " + std::to_wstring(exitCode) + L" for '" +
+                 AsciiToWide(repoId) + L"'.");
+            return;
+        }
+    }
+
+    repoStore_->SetStatus(repoId, "ready", static_cast<int64_t>(time(nullptr)));
+
+    Agent alex;
+    if (!agentStore_->Get("alex", alex)) {
+        log_(L"Orchestrator: RunRepoOnboarding could not find Alex — aborting onboarding for '" +
+             AsciiToWide(repoId) + L"'.");
+        return;
+    }
+
+    const std::string onboardChatId = "repo-onboard-" + repoId;
+    Chat existingChat;
+    if (!chatStore_->GetChat(onboardChatId, existingChat)) {
+        Chat onboardChat;
+        onboardChat.id = onboardChatId;
+        onboardChat.title = repo.githubUrl;
+        onboardChat.createdBy = "system";
+        onboardChat.status = "active";
+        // discordChannelId left empty on purpose — created lazily by
+        // EnsureChannelForChat the first time something is posted into it,
+        // same as every other chat here.
+        onboardChat.createdAt = static_cast<int64_t>(time(nullptr));
+        if (!chatStore_->CreateChat(onboardChat)) {
+            log_(L"Orchestrator: failed to create onboarding chat for repo '" + AsciiToWide(repoId) + L"'.");
+            return;
+        }
+        chatStore_->AddParticipant(onboardChatId, "agent", "alex");
+    }
+
+    std::string alexTemplate;
+    if (!promptTemplateStore_->Get(PromptTemplateNames::kRepoOnboardingAlex, alexTemplate)) {
+        log_(L"Orchestrator: repo_onboarding_alex template missing — aborting onboarding for '" +
+             AsciiToWide(repoId) + L"'.");
+        return;
+    }
+    const std::string renderedAlexPrompt =
+        RenderPromptTemplate(alexTemplate, repoDisplayName, repo.githubUrl, repo.localPath, repo.notes);
+
+    Message alexMessage;
+    alexMessage.chatId = onboardChatId;
+    alexMessage.senderType = "system";
+    alexMessage.senderId = "system";
+    alexMessage.type = "text";
+    alexMessage.content = renderedAlexPrompt;
+    alexMessage.createdAt = static_cast<int64_t>(time(nullptr));
+    if (chatStore_->InsertMessage(alexMessage) < 0) {
+        log_(L"Orchestrator: failed to insert the repo-onboarding prompt for '" + AsciiToWide(repoId) + L"'.");
+        return;
+    }
+
+    // Runs Alex's turn synchronously on this background thread — same
+    // precedent as /debug/inject-message calling HandleIncomingMessage
+    // directly off the HTTP handler thread. Alex may call
+    // submit_agent_for_approval during this turn; nothing further to do
+    // here — the actual agent creation happens once Cardon approves it (see
+    // HandleReaction's repo-onboarding hook below).
+    HandleIncomingMessage(onboardChatId);
 }
 
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
@@ -727,6 +913,60 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
         // Plain bot message, not a webhook identity — no single agent
         // "said" this, it's a system-level confirmation.
         discordBot_->PostPlain(chat.discordChannelId, confirmationText);
+    }
+
+    // Repo-onboarding hook: if this create_agent approval was requested
+    // inside a "repo-onboard-<repoId>" chat (i.e. Alex proposed this agent
+    // in response to RunRepoOnboarding's prompt) and Cardon just approved
+    // it, this IS the repo's dedicated expert agent — grant it real
+    // file/Bash tool access scoped to the repo, add it to the onboarding
+    // chat, and send it the second built-in prompt telling it to explore
+    // the repo and build its own memory of it. Rejection (isApprove ==
+    // false) needs no special handling here: the repo just stays without an
+    // agent, same as if Alex is asked again later.
+    constexpr const char* kRepoOnboardPrefix = "repo-onboard-";
+    if (isApprove && message.chatId.rfind(kRepoOnboardPrefix, 0) == 0) {
+        const std::string repoId = message.chatId.substr(std::string(kRepoOnboardPrefix).size());
+        Repo repo;
+        if (repoStore_->Get(repoId, repo) && repo.agentId.empty()) {
+            const int64_t now = static_cast<int64_t>(time(nullptr));
+            agentStore_->SetRepoLocalPath(agent.id, repo.localPath);
+            repoStore_->SetAgentId(repoId, agent.id, now);
+            repoStore_->SetStatus(repoId, "onboarding", now);
+            chatStore_->AddParticipant(message.chatId, "agent", agent.id);
+
+            std::string org, repoName;
+            GitHubRepo::ParseGitHubUrl(repo.githubUrl, org, repoName);
+            const std::string repoDisplayName = org.empty() || repoName.empty() ? repo.id : (org + "/" + repoName);
+
+            std::string agentTemplate;
+            if (promptTemplateStore_->Get(PromptTemplateNames::kRepoOnboardingAgent, agentTemplate)) {
+                const std::string rendered =
+                    RenderPromptTemplate(agentTemplate, repoDisplayName, repo.githubUrl, repo.localPath, repo.notes);
+                // Explicitly @-tag the new agent so the broadcast/addressing
+                // dispatch nudges specifically it to respond (Alex, still a
+                // participant, will just judge this isn't for it and reply
+                // SILENT — the normal mechanism, no special-casing needed).
+                Message onboardMessage;
+                onboardMessage.chatId = message.chatId;
+                onboardMessage.senderType = "system";
+                onboardMessage.senderId = "system";
+                onboardMessage.type = "text";
+                onboardMessage.content = "@" + agent.id + " " + rendered;
+                onboardMessage.createdAt = now;
+                if (chatStore_->InsertMessage(onboardMessage) >= 0) {
+                    HandleIncomingMessage(message.chatId);
+                }
+            } else {
+                log_(L"Orchestrator: repo_onboarding_agent template missing — could not send the "
+                     L"onboarding prompt for repo '" + AsciiToWide(repoId) + L"'.");
+            }
+
+            // Fire-and-forget past this point, same as everything else in
+            // this pipeline — "active" means "the prompt was sent," not
+            // "the agent's own setup turn definitely succeeded."
+            repoStore_->SetStatus(repoId, "active", static_cast<int64_t>(time(nullptr)));
+        }
     }
 }
 

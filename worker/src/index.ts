@@ -32,6 +32,13 @@ interface TurnRequest {
   // (tagged) or optional, its own call (not tagged). See addressingNote
   // below, which is what actually carries this to the model.
   tagged: boolean;
+  // Non-empty only for a repo-onboarding-created agent (see
+  // AgentStore::repoLocalPath / Orchestrator::HandleReaction) — the local
+  // checkout directory this agent is the dedicated expert for. When set,
+  // this agent gets real file/Bash tool access scoped to this directory
+  // (see the `tools`/`cwd` branch below). Empty for every other agent,
+  // which keeps today's zero-built-in-tools behavior unchanged.
+  repoLocalPath: string;
 }
 
 async function readStdin(): Promise<string> {
@@ -90,13 +97,28 @@ async function main(): Promise<void> {
         `conversation above, or SILENT if you're choosing not to respond.`;
     }
 
+    // Real capability expansion, confirmed intentionally by Cardon
+    // ("full tools now") despite this whole service running as a
+    // SYSTEM-privileged Windows Service: a repo-onboarding-created agent
+    // (repoLocalPath set) gets real Read/Write/Edit/Bash/Glob/Grep tools,
+    // with the SDK's own `cwd` option (confirmed via
+    // worker/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts —
+    // `Options.cwd?: string`, "Current working directory for the session")
+    // pointed at its repo's checkout directory. This is a SOFT, prompt-level
+    // boundary only — cwd tells the SDK/Bash tool where to default to, it is
+    // NOT an OS-level sandbox. Bash can still `cd ..`, use absolute paths,
+    // or otherwise act anywhere the SYSTEM account itself can reach; a
+    // determined or simply confused agent is not physically prevented from
+    // leaving `repoLocalPath`. Every other agent keeps today's exact
+    // behavior: no built-in tools, no cwd override, MCP-only.
+    const hasRepoAccess = Boolean(request.repoLocalPath);
+
     for await (const message of query({
       prompt,
       options: {
         systemPrompt: request.systemPrompt,
-        // No built-in tools (Bash/Read/Edit/...) — this agent only gets the
-        // orchestrator's own MCP tools (post_message, read_chat).
-        tools: [],
+        tools: hasRepoAccess ? ["Read", "Write", "Edit", "Bash", "Glob", "Grep"] : [],
+        ...(hasRepoAccess ? { cwd: request.repoLocalPath } : {}),
         mcpServers: {
           orchestrator: {
             type: "stdio",
@@ -105,7 +127,8 @@ async function main(): Promise<void> {
           },
         },
         // No interactive terminal exists to approve tool calls, and the
-        // only tools available are our own scoped MCP tools.
+        // only tools available are our own scoped MCP tools plus (for a
+        // repo-scoped agent) the built-in file/Bash tools above.
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
         ...(request.resumeSessionId ? { resume: request.resumeSessionId } : {}),

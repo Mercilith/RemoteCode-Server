@@ -28,11 +28,13 @@ json MakeResult(const json& id, const json& result) {
 } // namespace
 
 McpServer::McpServer(
-    ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore, ActivityLog& activityLog,
-    std::string agentId, std::string chatId)
+    ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore,
+    PromptTemplateStore& promptTemplateStore, ActivityLog& activityLog, std::string agentId,
+    std::string chatId)
     : chatStore_(chatStore),
       agentStore_(agentStore),
       approvalStore_(approvalStore),
+      promptTemplateStore_(promptTemplateStore),
       activityLog_(activityLog),
       agentId_(std::move(agentId)),
       chatId_(std::move(chatId)) {}
@@ -70,7 +72,8 @@ std::string McpServer::HandleLine(const std::string& line) {
         const std::string toolName = params.value("name", "");
         const json arguments = params.value("arguments", json::object());
 
-        ToolContext ctx{chatStore_, agentStore_, approvalStore_, activityLog_, agentId_, chatId_};
+        ToolContext ctx{
+            chatStore_, agentStore_, approvalStore_, promptTemplateStore_, activityLog_, agentId_, chatId_};
         std::string errorMessage;
         const json result = Tools::Call(ctx, toolName, arguments, errorMessage);
 

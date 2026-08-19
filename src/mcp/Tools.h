@@ -5,6 +5,7 @@
 #include "../db/AgentStore.h"
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
+#include "../db/PromptTemplateStore.h"
 #include "../third_party/json.hpp"
 #include "../util/ActivityLog.h"
 
@@ -14,6 +15,7 @@ struct ToolContext {
     ChatStore& chatStore;
     AgentStore& agentStore;
     ApprovalStore& approvalStore;
+    PromptTemplateStore& promptTemplateStore;
     ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default

@@ -38,6 +38,24 @@ json AgentToJson(const Agent& agent, bool includeDetail) {
     return out;
 }
 
+json RepoToJson(const Repo& repo) {
+    return json{
+        {"id", repo.id},
+        {"github_url", repo.githubUrl},
+        {"local_path", repo.localPath},
+        {"agent_id", repo.agentId},
+        {"status", repo.status},
+        {"notes", repo.notes},
+        {"last_error", repo.lastError},
+        {"created_at", repo.createdAt},
+        {"updated_at", repo.updatedAt},
+    };
+}
+
+json PromptTemplateToJson(const PromptTemplate& t) {
+    return json{{"name", t.name}, {"content", t.content}, {"updated_at", t.updatedAt}};
+}
+
 void SendError(httplib::Response& res, int status, const std::string& message) {
     res.status = status;
     res.set_content(json{{"error", message}}.dump(), "application/json");
@@ -63,15 +81,18 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json& outBod
 
 AdminServer::AdminServer(
     AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
-    std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
-    InjectMessageFn injectMessage)
+    RepoStore& repoStore, PromptTemplateStore& promptTemplateStore, std::wstring dbPath,
+    std::string claudeConfigDir, std::wstring logDir, InjectMessageFn injectMessage, AddRepoFn addRepo)
     : agentStore_(agentStore),
       agentSessionStore_(agentSessionStore),
       chatStore_(chatStore),
+      repoStore_(repoStore),
+      promptTemplateStore_(promptTemplateStore),
       dbPath_(std::move(dbPath)),
       claudeConfigDir_(std::move(claudeConfigDir)),
       logDir_(std::move(logDir)),
-      injectMessage_(std::move(injectMessage)) {}
+      injectMessage_(std::move(injectMessage)),
+      addRepo_(std::move(addRepo)) {}
 
 AdminServer::~AdminServer() = default;
 
@@ -292,6 +313,87 @@ void AdminServer::Run(int port) {
         Agent updated = target;
         agentStore_.Get(target.id, updated); // pick up whatever update_agent changed, if anything
         SendJson(res, json{{"reply", result.response}, {"agent", AgentToJson(updated, true)}});
+    });
+
+    // --- Repo onboarding endpoints --------------------------------------
+    // Exact contract — RemoteCode-Desktop is being built against this in
+    // parallel, see the design doc's admin API section.
+
+    server_->Post("/repos", [this](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        if (!ParseBody(req, res, body)) {
+            return;
+        }
+        if (!body.contains("github_url") || body["github_url"].get<std::string>().empty()) {
+            SendError(res, 400, "'github_url' is required");
+            return;
+        }
+        const std::string githubUrl = body["github_url"].get<std::string>();
+        const std::string notes = body.value("notes", std::string());
+
+        if (!addRepo_) {
+            SendError(res, 500, "repo onboarding is not wired up");
+            return;
+        }
+        std::string error;
+        const std::string repoId = addRepo_(githubUrl, notes, error);
+        if (repoId.empty()) {
+            SendError(res, 400, error.empty() ? "could not parse github_url" : error);
+            return;
+        }
+
+        Repo repo;
+        const std::string status = repoStore_.Get(repoId, repo) ? repo.status : "cloning";
+        SendJson(res, json{{"repo_id", repoId}, {"status", status}}, 201);
+    });
+
+    server_->Get("/repos", [this](const httplib::Request&, httplib::Response& res) {
+        json out = json::array();
+        for (const Repo& repo : repoStore_.ListAll()) {
+            out.push_back(RepoToJson(repo));
+        }
+        SendJson(res, out);
+    });
+
+    server_->Get("/repos/:id", [this](const httplib::Request& req, httplib::Response& res) {
+        Repo repo;
+        if (!repoStore_.Get(req.path_params.at("id"), repo)) {
+            SendError(res, 404, "no repo with that id");
+            return;
+        }
+        SendJson(res, RepoToJson(repo));
+    });
+
+    server_->Get("/prompt-templates", [this](const httplib::Request&, httplib::Response& res) {
+        json out = json::array();
+        for (const PromptTemplate& t : promptTemplateStore_.ListAll()) {
+            out.push_back(PromptTemplateToJson(t));
+        }
+        SendJson(res, out);
+    });
+
+    server_->Patch("/prompt-templates/:name", [this](const httplib::Request& req, httplib::Response& res) {
+        const std::string name = req.path_params.at("name");
+        std::string existingContent;
+        if (!promptTemplateStore_.Get(name, existingContent)) {
+            SendError(res, 404, "no prompt template with that name");
+            return;
+        }
+        json body;
+        if (!ParseBody(req, res, body)) {
+            return;
+        }
+        if (!body.contains("content")) {
+            SendError(res, 400, "'content' is required");
+            return;
+        }
+        const std::string content = body["content"].get<std::string>();
+        const int64_t now = static_cast<int64_t>(time(nullptr));
+        if (!promptTemplateStore_.Set(name, content, now)) {
+            SendError(res, 500, "failed to save the prompt template");
+            return;
+        }
+        SendJson(res, json{{"name", name}, {"content", content}, {"updated_at", now}});
     });
 
     // --- DEBUG/DEV-ONLY endpoints -------------------------------------

@@ -22,6 +22,10 @@ void DiscordBot::SetReactionHandler(DiscordReactionHandler handler) {
     onReaction_ = std::move(handler);
 }
 
+void DiscordBot::SetSlashCommandAddRepoHandler(SlashCommandAddRepoHandler handler) {
+    onSlashCommandAddRepo_ = std::move(handler);
+}
+
 void DiscordBot::Run() {
     {
         std::lock_guard<std::mutex> lock(botMutex_);
@@ -36,10 +40,24 @@ void DiscordBot::Run() {
         if (onLog_) {
             onLog_("Discord gateway ready.");
         }
+        if (onSlashCommandAddRepo_) {
+            // Global command registration — no guild id needed, and it's a
+            // no-op (harmless overwrite) on every reconnect, so simplest to
+            // just always do it here rather than tracking "did we already
+            // register this session."
+            dpp::slashcommand addRepoCommand(
+                "add-repo", "Clone a GitHub repo and set up a dedicated expert agent for it.", bot_->me.id);
+            addRepoCommand.add_option(
+                dpp::command_option(dpp::co_string, "url", "GitHub repo URL (or org/repo)", true));
+            addRepoCommand.add_option(
+                dpp::command_option(dpp::co_string, "notes", "Optional notes to inject into the onboarding prompt", false));
+            bot_->global_command_create(addRepoCommand);
+        }
     });
 
     bot_->on_message_create([this](const dpp::message_create_t& event) { HandleMessageCreate(event); });
     bot_->on_message_reaction_add([this](const dpp::message_reaction_add_t& event) { HandleReactionAdd(event); });
+    bot_->on_slashcommand([this](const dpp::slashcommand_t& event) { HandleSlashCommand(event); });
 
     bot_->start(dpp::st_wait);
 }
@@ -108,6 +126,34 @@ void DiscordBot::HandleReactionAdd(const dpp::message_reaction_add_t& event) {
     if (onReaction_) {
         onReaction_(std::to_string(event.message_id), event.reacting_emoji.name);
     }
+}
+
+void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
+    if (event.command.get_command_name() != "add-repo" || !onSlashCommandAddRepo_) {
+        return;
+    }
+
+    // get_parameter returns command_value by value — bind it to a named
+    // local before taking std::get_if's pointer into it, since a pointer
+    // into an unnamed temporary would dangle past this statement.
+    std::string url;
+    const dpp::command_value urlParam = event.get_parameter("url");
+    if (const std::string* urlValue = std::get_if<std::string>(&urlParam)) {
+        url = *urlValue;
+    }
+    std::string notes;
+    const dpp::command_value notesParam = event.get_parameter("notes");
+    if (const std::string* notesValue = std::get_if<std::string>(&notesParam)) {
+        notes = *notesValue;
+    }
+
+    // Discord requires an ack within 3 seconds — reply immediately, the
+    // actual clone+onboarding work happens off this thread (see
+    // Orchestrator::Run's wiring of this handler, which hands off to a
+    // detached thread before calling Orchestrator::AddRepo).
+    event.reply("Cloning and setting things up \xE2\x80\x94 I'll update you in the channel once it's ready.");
+
+    onSlashCommandAddRepo_(url, notes);
 }
 
 bool DiscordBot::EnsureWebhook(

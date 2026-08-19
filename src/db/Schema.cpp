@@ -101,6 +101,26 @@ CREATE TABLE IF NOT EXISTS approvals (
     resolved_at     INTEGER
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS repos (
+    id             TEXT PRIMARY KEY,
+    github_url     TEXT NOT NULL,
+    local_path     TEXT NOT NULL,
+    agent_id       TEXT,
+    status         TEXT NOT NULL,
+    notes          TEXT,
+    last_error     TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL
+);
+)sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    name        TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace
@@ -122,6 +142,9 @@ bool Schema::EnsureCreated(Database& db) {
         return false;
     }
     if (!EnsureColumn(db, "agents", "discord_bot_username", "TEXT")) {
+        return false;
+    }
+    if (!EnsureColumn(db, "agents", "repo_local_path", "TEXT")) {
         return false;
     }
 

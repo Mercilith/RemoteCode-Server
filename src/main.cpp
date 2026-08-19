@@ -4,6 +4,7 @@
 #include "db/ApprovalStore.h"
 #include "db/ChatStore.h"
 #include "db/Database.h"
+#include "db/PromptTemplateStore.h"
 #include "db/Schema.h"
 #include "mcp/McpServer.h"
 #include "service/ServiceMain.h"
@@ -60,9 +61,12 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     ChatStore chatStore(db);
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
     const std::string narrowAgentId = NarrowAscii(agentId);
     ActivityLog activityLog(logDir, "mcp-" + narrowAgentId);
-    McpServer server(chatStore, agentStore, approvalStore, activityLog, narrowAgentId, NarrowAscii(chatId));
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, narrowAgentId,
+        NarrowAscii(chatId));
     server.RunStdio();
     return true;
 }
