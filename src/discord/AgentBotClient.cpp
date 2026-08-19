@@ -36,6 +36,10 @@ bool AgentBotClient::FetchSelf(std::string& outUserId, std::string& outUsername)
     return true;
 }
 
+void AgentBotClient::TriggerTyping(const std::string& channelId) {
+    bot_->channel_typing(std::stoull(channelId));
+}
+
 std::string AgentBotClient::PostAsSelf(const std::string& channelId, const std::string& content) {
     // See DiscordBot::PostAsAgent's identical comment — Discord rejects a
     // single message over ~2000 chars outright, found via a real agent

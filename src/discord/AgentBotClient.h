@@ -33,6 +33,13 @@ public:
     // message id, or an empty string on any REST failure.
     std::string PostAsSelf(const std::string& channelId, const std::string& content);
 
+    // Fires the "X is typing..." indicator in `channelId` as this bot.
+    // Fire-and-forget (dpp's default callback just logs on error) — Discord
+    // only shows the indicator for ~10 seconds per call, so a caller wanting
+    // it to stay visible across a longer operation needs to call this
+    // repeatedly (see Orchestrator's typing-indicator loop).
+    void TriggerTyping(const std::string& channelId);
+
 private:
     std::unique_ptr<dpp::cluster> bot_;
     std::thread runThread_;

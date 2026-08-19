@@ -670,8 +670,17 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         } else {
             recent = chatStore_->RecentMessages(chatId, 50);
         }
+        std::atomic<bool> stopTyping{false};
+        std::thread typingThread = StartTypingIndicator(agent, chat.discordChannelId, &stopTyping);
+
         const AgentTurnResult turnResult = AgentTurn::Run(
             agent, recent, dbPath_, claudeConfigDir_, chatId, resumeSessionId, logDir_, entry.tagged);
+
+        stopTyping.store(true);
+        if (typingThread.joinable()) {
+            typingThread.join();
+        }
+
         if (!turnResult.ok) {
             log_(L"Orchestrator: turn failed for agent '" + AsciiToWide(agent.id) + L"': " +
                  AsciiToWide(turnResult.error));
@@ -1173,6 +1182,33 @@ std::string Orchestrator::PostAsAgent(const Agent& agent, const std::string& cha
         return ownBot->PostAsSelf(channelId, content);
     }
     return discordBot_->PostAsAgent(channelId, agent.id, agent.name, content);
+}
+
+std::thread Orchestrator::StartTypingIndicator(
+    const Agent& agent, const std::string& channelId, std::atomic<bool>* stopFlag) {
+    if (channelId.empty()) {
+        return std::thread();
+    }
+    AgentBotClient* ownBot = GetOrCreateAgentBotClient(agent);
+    if (ownBot == nullptr) {
+        return std::thread(); // shared-webhook agent — no bot identity of its own to type as
+    }
+
+    ownBot->TriggerTyping(channelId); // fire one immediately, don't wait ~8s for the first sign of life
+    return std::thread([ownBot, channelId, stopFlag]() {
+        while (!stopFlag->load()) {
+            // Sleep in short slices rather than one long sleep so Stop
+            // (stopFlag->store(true)) is noticed promptly instead of up to
+            // 8s late — the turn is usually done well before that.
+            for (int i = 0; i < 80 && !stopFlag->load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (stopFlag->load()) {
+                break;
+            }
+            ownBot->TriggerTyping(channelId);
+        }
+    });
 }
 
 AgentBotClient* Orchestrator::GetOrCreateAgentBotClient(const Agent& agent) {

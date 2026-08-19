@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <windows.h>
 
@@ -193,6 +195,19 @@ private:
     // token changes (e.g. reassigned via the admin API). Returns nullptr
     // if the agent has no own bot configured or the token fails to decrypt.
     AgentBotClient* GetOrCreateAgentBotClient(const Agent& agent);
+
+    // Starts a background thread that fires the "X is typing..." indicator
+    // for `agent` in `channelId` immediately, then every ~8 seconds
+    // (Discord only shows the indicator for ~10s per call, so it has to be
+    // refreshed to stay visible across a longer-running turn). Only agents
+    // with their own Discord bot can do this — a shared-webhook agent has
+    // no bot identity of its own to type as — so this is a silent no-op
+    // (returns a default-constructed, non-joinable thread) if `agent` has
+    // no own bot configured or `channelId` is empty. `stopFlag` must outlive
+    // the returned thread; the caller sets it true and joins the thread once
+    // whatever it's covering for (the turn) is done — see the call site in
+    // HandleIncomingMessage.
+    std::thread StartTypingIndicator(const Agent& agent, const std::string& channelId, std::atomic<bool>* stopFlag);
 
     // Ensures `chat` has a real Discord channel, creating one (and
     // persisting it via ChatStore::SetChatDiscordChannel) if it doesn't yet.
