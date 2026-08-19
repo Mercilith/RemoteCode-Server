@@ -55,13 +55,18 @@ json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError)
         return {};
     }
 
-    // "dm-<agentId>" is deterministic on purpose — no lookup table needed,
-    // and it doubles as the signal Orchestrator uses to skip @mention
-    // dispatch for these messages (a DM chat only ever has one agent).
-    const std::string dmChatId = "dm-" + ctx.agentId;
+    // Target whichever DM chat is currently active for this agent, not a
+    // hardcoded "dm-<agentId>" — /create-dm can retire that chat and start a
+    // fresh one under a different id (see Orchestrator::HandleSlashCommandCreateDm),
+    // and message_user must follow along to whatever's current rather than
+    // resurrecting an archived conversation. Falls back to creating the
+    // original "dm-<agentId>" id if this agent has no DM yet at all. Every
+    // id used here still starts with "dm-", which is the actual signal
+    // Orchestrator uses to skip @mention dispatch for these messages (a DM
+    // chat only ever has one agent).
     Chat dmChat;
-    if (!ctx.chatStore.GetChat(dmChatId, dmChat)) {
-        dmChat.id = dmChatId;
+    if (!ctx.chatStore.GetActiveDmChatForAgent(ctx.agentId, dmChat)) {
+        dmChat.id = "dm-" + ctx.agentId;
         dmChat.title = ctx.agentId + " (DM)";
         dmChat.createdBy = ctx.agentId;
         dmChat.status = "active";
@@ -74,8 +79,9 @@ json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError)
             outError = "failed to create the DM chat";
             return {};
         }
-        ctx.chatStore.AddParticipant(dmChatId, "agent", ctx.agentId);
+        ctx.chatStore.AddParticipant(dmChat.id, "agent", ctx.agentId);
     }
+    const std::string& dmChatId = dmChat.id;
 
     Message message;
     message.chatId = dmChatId;

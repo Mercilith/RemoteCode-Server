@@ -58,6 +58,14 @@ public:
     // the list_my_chats MCP tool (default: archived chats don't clutter an
     // agent's own chat list).
     std::vector<Chat> ListChatsForParticipant(const std::string& participantId, bool includeArchived = false);
+    // The one currently-active "dm-*"-prefixed chat `agentId` participates
+    // in, if any (most recently created if somehow more than one — shouldn't
+    // happen since /create-dm archives the previous one before making a new
+    // one). Used to find "the" DM with an agent without assuming its id is
+    // exactly "dm-<agentId>" — later DM generations use a
+    // "dm-<agentId>-<timestamp>" id instead, since the original id is
+    // already taken by the archived chat.
+    bool GetActiveDmChatForAgent(const std::string& agentId, Chat& outChat);
     // Persists a Discord channel id onto a chat that was created without
     // one yet — used once a lazily-created DM channel (see
     // Orchestrator::EnsureChannelForChat) actually exists.

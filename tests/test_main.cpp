@@ -1557,6 +1557,44 @@ void TestChatStoreArchiving() {
         "ChatStore: ListChatsForParticipant(includeArchived=true) returns everything");
 }
 
+void TestChatStoreGetActiveDmChatForAgent() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore store(db);
+
+    Chat noDm;
+    Check(!store.GetActiveDmChatForAgent("dax", noDm), "ChatStore: GetActiveDmChatForAgent finds nothing before any DM exists");
+
+    Check(store.CreateChat(Chat{"dm-dax", "dax (DM)", "user", "active", "", 1}), "ChatStore: create original dm-dax");
+    store.AddParticipant("dm-dax", "agent", "dax");
+
+    Chat active1;
+    Check(
+        store.GetActiveDmChatForAgent("dax", active1) && active1.id == "dm-dax",
+        "ChatStore: GetActiveDmChatForAgent finds the original dm-<agentId> chat");
+
+    // Simulate /create-dm's "retire the old one, start a new one" flow: the
+    // recreated DM gets a distinct id since "dm-dax" is now taken by the
+    // archived chat.
+    Check(store.SetChatStatus("dm-dax", "archived"), "ChatStore: archive the original DM");
+    Check(
+        store.CreateChat(Chat{"dm-dax-999", "dax (DM)", "user", "active", "", 2}),
+        "ChatStore: create the recreated dm-dax-999 chat");
+    store.AddParticipant("dm-dax-999", "agent", "dax");
+
+    Chat active2;
+    Check(
+        store.GetActiveDmChatForAgent("dax", active2) && active2.id == "dm-dax-999",
+        "ChatStore: GetActiveDmChatForAgent follows to the new chat once the old one is archived, ignoring it "
+        "even though it still has 'dax' as a participant");
+
+    Chat otherAgent;
+    Check(
+        !store.GetActiveDmChatForAgent("alex", otherAgent),
+        "ChatStore: GetActiveDmChatForAgent doesn't match a DM chat belonging to a different agent");
+}
+
 void TestRequestAddAgentToChatTool() {
     Database db;
     db.Open(L":memory:");
@@ -1649,6 +1687,7 @@ int main() {
     TestChatStore();
     TestChatStoreParticipantModes();
     TestChatStoreArchiving();
+    TestChatStoreGetActiveDmChatForAgent();
     TestMcpServer();
     TestApprovalWorkflowTool();
     TestMessageUserTool();

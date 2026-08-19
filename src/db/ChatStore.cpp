@@ -249,6 +249,29 @@ bool ChatStore::SetParticipantMode(
     return stmt.Ok();
 }
 
+bool ChatStore::GetActiveDmChatForAgent(const std::string& agentId, Chat& outChat) {
+    Statement stmt(
+        db_,
+        "SELECT c.id, c.title, c.created_by, c.status, c.discord_channel_id, c.created_at "
+        "FROM chats c JOIN chat_participants p ON p.chat_id = c.id "
+        "WHERE p.participant_type = 'agent' AND p.participant_id = ?1 AND c.status = 'active' "
+        "AND c.id LIKE 'dm-%' ORDER BY c.created_at DESC LIMIT 1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, agentId);
+    if (!stmt.Step()) {
+        return false;
+    }
+    outChat.id = stmt.ColumnText(0);
+    outChat.title = OrEmpty(stmt, 1);
+    outChat.createdBy = stmt.ColumnText(2);
+    outChat.status = stmt.ColumnText(3);
+    outChat.discordChannelId = OrEmpty(stmt, 4);
+    outChat.createdAt = stmt.ColumnInt64(5);
+    return true;
+}
+
 bool ChatStore::SetChatStatus(const std::string& chatId, const std::string& status) {
     Statement stmt(db_, "UPDATE chats SET status = ?1 WHERE id = ?2;");
     if (!stmt.Valid()) {

@@ -870,10 +870,16 @@ std::string Orchestrator::EnsureChannelForChat(const Chat& chat) {
     std::string channelName;
 
     if (isDm) {
-        // "dm-<agentId>" is deterministic — the one agent is just the
-        // suffix. Preserve EnsureDmChannel's old behavior exactly: bail out
-        // if that agent isn't known/active.
-        const std::string agentId = chat.id.substr(3);
+        // DM chat ids are no longer always exactly "dm-<agentId>" — a
+        // recreated DM (see HandleSlashCommandCreateDm) gets a
+        // "dm-<agentId>-<timestamp>" id instead, since the original id
+        // belongs to the archived chat it replaced. Resolve the participant
+        // agent from chat_participants instead of parsing the id.
+        const std::vector<std::string> participantAgentIds = chatStore_->ListParticipantAgentIds(chat.id);
+        if (participantAgentIds.empty()) {
+            return "";
+        }
+        const std::string& agentId = participantAgentIds.front();
         Agent agent;
         if (!agentStore_->Get(agentId, agent) || agent.status != "active") {
             return "";
@@ -1245,30 +1251,50 @@ std::string Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw
         return "'" + agentRaw + "' is not a known, active agent.";
     }
 
-    // "dm-<agentId>" — must match mcp/Tools.cpp's MessageUser exactly, so a
-    // DM opened here and one an agent opens itself via message_user are
-    // always the same chat, never duplicated.
-    const std::string dmChatId = "dm-" + agent.id;
-    Chat dmChat;
-    if (!chatStore_->GetChat(dmChatId, dmChat)) {
-        dmChat.id = dmChatId;
-        dmChat.title = agent.id + " (DM)";
-        dmChat.createdBy = "user";
-        dmChat.status = "active";
-        dmChat.createdAt = static_cast<int64_t>(time(nullptr));
-        if (!chatStore_->CreateChat(dmChat)) {
-            return "Failed to create the DM chat (internal error).";
+    // /create-dm means "start over" — a genuinely new conversation with
+    // fresh context, not a reopen of whatever DM already exists (that's
+    // what message_user/MessageUser's get-or-create is for). If an active
+    // DM with this agent already exists, retire it first: archive the chat
+    // and delete its Discord channel, exactly like /close-chat would, so
+    // there's never more than one live channel per agent hanging around.
+    Chat previousDm;
+    if (chatStore_->GetActiveDmChatForAgent(agent.id, previousDm)) {
+        chatStore_->SetChatStatus(previousDm.id, "archived");
+        if (!previousDm.discordChannelId.empty() && !discordBot_->DeleteChannel(previousDm.discordChannelId)) {
+            log_(L"Orchestrator: failed to delete previous DM channel '" +
+                 AsciiToWide(previousDm.discordChannelId) + L"' for chat '" + AsciiToWide(previousDm.id) +
+                 L"' while recreating it — the chat is archived regardless.");
         }
+    }
+
+    // The very first DM with an agent keeps the plain "dm-<agentId>" id
+    // (matches MessageUser's get-or-create default and any pre-existing
+    // live data); every DM created after that needs a distinct id since
+    // "dm-<agentId>" now belongs to the just-archived chat. Either way the
+    // "dm-" prefix is what the rest of the system (mention-dispatch
+    // skipping, EnsureChannelForChat's DM branch) actually keys off of, not
+    // the exact suffix.
+    const std::string dmChatId =
+        previousDm.id.empty() ? "dm-" + agent.id : "dm-" + agent.id + "-" + std::to_string(time(nullptr));
+
+    Chat dmChat;
+    dmChat.id = dmChatId;
+    dmChat.title = agent.id + " (DM)";
+    dmChat.createdBy = "user";
+    dmChat.status = "active";
+    dmChat.createdAt = static_cast<int64_t>(time(nullptr));
+    if (!chatStore_->CreateChat(dmChat)) {
+        return "Failed to create the DM chat (internal error).";
     }
     chatStore_->AddParticipant(dmChatId, "agent", agent.id);
 
     const std::string channelId = EnsureChannelForChat(dmChat);
     if (channelId.empty()) {
         return "DM chat with '" + agent.name +
-               "' exists, but its Discord channel could not be created — check "
+               "' was created, but its Discord channel could not be — check "
                "discord_owner_user_id/discord_guild_id configuration.";
     }
-    return "Your DM with " + agent.name + ": <#" + channelId + ">";
+    return "Started a fresh DM with " + agent.name + ": <#" + channelId + ">";
 }
 
 std::string Orchestrator::HandleSlashCommandAddAgent(const std::string& channelId, const std::string& agentRaw) {
