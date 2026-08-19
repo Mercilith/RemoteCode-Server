@@ -56,6 +56,25 @@ void Check(bool condition, const std::string& description) {
     }
 }
 
+// Runs one Test* function, catching anything it throws (e.g. json::parse on
+// a response a test forgot was an error, not the success shape it assumed)
+// so a single bad test reports as a failure with the exception message
+// instead of taking down the entire suite with an unhandled-exception abort
+// (which on Windows shows up as a bare nonzero/negative exit code and no
+// indication of which test — or whether it was a real bug at all — was the
+// cause). See main()'s call sites below.
+void RunTest(const std::string& name, void (*testFn)()) {
+    try {
+        testFn();
+    } catch (const std::exception& e) {
+        std::cerr << "FAIL: " << name << " threw an exception: " << e.what() << std::endl;
+        ++failures;
+    } catch (...) {
+        std::cerr << "FAIL: " << name << " threw a non-std::exception value" << std::endl;
+        ++failures;
+    }
+}
+
 void TestGreeting() {
     Check(greeting() == "Hello, World!", "greeting() returns the expected string");
 }
@@ -1755,36 +1774,42 @@ void TestRequestAddAgentToChatTool() {
 } // namespace
 
 int main() {
-    TestGreeting();
-    TestSchema();
-    TestAgentStore();
-    TestAgentStoreBotToken();
-    TestAgentSessionStore();
-    TestAgentSessionStoreGetIfFresh();
-    TestChatSummaryStore();
-    TestChatStore();
-    TestChatStoreParticipantModes();
-    TestChatStoreArchiving();
-    TestChatStoreGetActiveDmChatForAgent();
-    TestMcpServer();
-    TestApprovalWorkflowTool();
-    TestMessageUserTool();
-    TestUpdateAgentTool();
-    TestToolPermissionEnforcement();
-    TestRememberTool();
-    TestListAgentsTool();
-    TestListAgentsToolExposesPermissionsToUpdateAgentHolder();
-    TestStartChatAndListMyChatsTools();
-    TestRequestAddAgentToChatTool();
-    TestMentions();
-    TestChunkForDiscord();
-    TestGitHubRepoParseGitHubUrl();
-    TestRepoStore();
-    TestWorkspaceStore();
-    TestWorkspaceCreatorValidation();
-    TestCreateWorkspaceToolValidation();
-    TestPromptTemplateStore();
-    TestPromptTemplateMcpTools();
+    // Each test runs through RunTest so an unexpected exception in one test
+    // (e.g. a bad assumption about a response shape) is caught and reported
+    // as a named failure, rather than aborting the whole binary before any
+    // later test — or the final pass/fail summary — gets a chance to run.
+#define RUN(fn) RunTest(#fn, fn)
+    RUN(TestGreeting);
+    RUN(TestSchema);
+    RUN(TestAgentStore);
+    RUN(TestAgentStoreBotToken);
+    RUN(TestAgentSessionStore);
+    RUN(TestAgentSessionStoreGetIfFresh);
+    RUN(TestChatSummaryStore);
+    RUN(TestChatStore);
+    RUN(TestChatStoreParticipantModes);
+    RUN(TestChatStoreArchiving);
+    RUN(TestChatStoreGetActiveDmChatForAgent);
+    RUN(TestMcpServer);
+    RUN(TestApprovalWorkflowTool);
+    RUN(TestMessageUserTool);
+    RUN(TestUpdateAgentTool);
+    RUN(TestToolPermissionEnforcement);
+    RUN(TestRememberTool);
+    RUN(TestListAgentsTool);
+    RUN(TestListAgentsToolExposesPermissionsToUpdateAgentHolder);
+    RUN(TestStartChatAndListMyChatsTools);
+    RUN(TestRequestAddAgentToChatTool);
+    RUN(TestMentions);
+    RUN(TestChunkForDiscord);
+    RUN(TestGitHubRepoParseGitHubUrl);
+    RUN(TestRepoStore);
+    RUN(TestWorkspaceStore);
+    RUN(TestWorkspaceCreatorValidation);
+    RUN(TestCreateWorkspaceToolValidation);
+    RUN(TestPromptTemplateStore);
+    RUN(TestPromptTemplateMcpTools);
+#undef RUN
 
     if (failures > 0) {
         std::cerr << failures << " test(s) failed." << std::endl;
