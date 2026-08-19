@@ -195,6 +195,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     chatSummaryStore_ = std::make_unique<ChatSummaryStore>(*db_);
     repoStore_ = std::make_unique<RepoStore>(*db_);
     workspaceStore_ = std::make_unique<WorkspaceStore>(*db_);
+    tempPermissionStore_ = std::make_unique<TempPermissionStore>(*db_);
     promptTemplateStore_ = std::make_unique<PromptTemplateStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
     promptTemplateStore_->SeedDefaultsIfEmpty();
@@ -787,6 +788,11 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     // the DB/filesystem half of the work.
     EnsurePendingWorkspaceChannels();
 
+    // Same rationale again — add_agent_to_workspace also only does the DB
+    // write from the MCP subprocess; this grants the joining agent's own bot
+    // access to the (already-existing, by definition) workspace channel.
+    SyncPendingWorkspaceAgentGrants();
+
     // Best-effort summary housekeeping — once per HandleIncomingMessage
     // call (not once per agent turn above), after real dispatch is done.
     RefreshChatSummaryIfNeeded(chatId);
@@ -1022,6 +1028,47 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
             if (isApprove && !targetAgent.discordBotUserId.empty()) {
                 discordBot_->GrantChannelAccess(targetChat.discordChannelId, targetAgent.discordBotUserId);
             }
+        }
+        return;
+    }
+
+    if (approval.kind == "temp_tool_permission") {
+        json payload;
+        try {
+            payload = json::parse(approval.payloadJson);
+        } catch (const json::parse_error&) {
+            return;
+        }
+        const std::string targetAgentId = payload.value("agent_id", "");
+        const std::string toolName = payload.value("tool_name", "");
+
+        Agent targetAgent;
+        if (targetAgentId.empty() || toolName.empty() || !agentStore_->Get(targetAgentId, targetAgent)) {
+            return;
+        }
+
+        std::string confirmationText;
+        if (isApprove) {
+            tempPermissionStore_->Grant(targetAgentId, toolName, static_cast<int64_t>(time(nullptr)));
+            confirmationText =
+                "Granted '" + targetAgent.name + "' one-time use of '" + toolName + "'.";
+        } else {
+            confirmationText = "Request from '" + targetAgent.name + "' for one-time use of '" + toolName +
+                                "' was rejected.";
+        }
+
+        Message reply;
+        reply.chatId = message.chatId;
+        reply.senderType = "system";
+        reply.senderId = "system";
+        reply.type = "system_event";
+        reply.content = confirmationText;
+        reply.createdAt = static_cast<int64_t>(time(nullptr));
+        chatStore_->InsertMessage(reply);
+
+        Chat chat;
+        if (chatStore_->GetChat(message.chatId, chat) && !chat.discordChannelId.empty()) {
+            discordBot_->PostPlain(chat.discordChannelId, confirmationText);
         }
         return;
     }
@@ -1483,5 +1530,32 @@ bool Orchestrator::EnsureWorkspaceDiscordAssets(const std::string& workspaceId) 
 void Orchestrator::EnsurePendingWorkspaceChannels() {
     for (const Workspace& workspace : workspaceStore_->ListPendingDiscordSetup()) {
         EnsureWorkspaceDiscordAssets(workspace.id); // best-effort — logs and keeps retrying on failure
+    }
+}
+
+void Orchestrator::SyncPendingWorkspaceAgentGrants() {
+    for (const WorkspaceStore::PendingAgentGrant& grant : workspaceStore_->ListPendingAgentGrants()) {
+        Workspace workspace;
+        Agent agent;
+        if (!workspaceStore_->Get(grant.workspaceId, workspace) || !agentStore_->Get(grant.agentId, agent) ||
+            agent.status != "active") {
+            // Nothing sensible to grant — drop the pending row rather than
+            // retrying forever against a workspace/agent that no longer
+            // exists or is disabled.
+            workspaceStore_->ClearPendingAgentGrant(grant.workspaceId, grant.agentId);
+            continue;
+        }
+
+        Chat chat;
+        if (!chatStore_->GetChat(workspace.chatId, chat) || chat.discordChannelId.empty()) {
+            continue; // channel doesn't exist yet — leave pending, retry next tick
+        }
+
+        // Shared-webhook agents (no own bot) need nothing extra — same rule
+        // as every other "grant channel access" call site in this file.
+        if (!agent.discordBotUserId.empty()) {
+            discordBot_->GrantChannelAccess(chat.discordChannelId, agent.discordBotUserId);
+        }
+        workspaceStore_->ClearPendingAgentGrant(grant.workspaceId, grant.agentId);
     }
 }

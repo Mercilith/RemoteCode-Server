@@ -15,6 +15,7 @@
 #include "../db/Database.h"
 #include "../db/PromptTemplateStore.h"
 #include "../db/RepoStore.h"
+#include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
 #include "../discord/AgentBotClient.h"
 #include "../discord/DiscordBot.h"
@@ -134,6 +135,14 @@ public:
     // end of HandleIncomingMessage. Picks up workspaces the create_workspace
     // MCP tool created (DB/filesystem-only, no Discord access of its own).
     void EnsurePendingWorkspaceChannels();
+    // Polls WorkspaceStore::ListPendingAgentGrants and, for each, grants that
+    // agent's own Discord bot access to its workspace's already-existing
+    // channel — the Discord-side half of the add_agent_to_workspace MCP tool
+    // (see mcp/Tools.cpp's AddAgentToWorkspace), which itself only does the
+    // DB write (AddParticipant) since it runs in the MCP subprocess with no
+    // live Discord connection. Called from the same housekeeping spot as
+    // EnsurePendingWorkspaceChannels/PostPendingApprovals.
+    void SyncPendingWorkspaceAgentGrants();
 
 private:
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
@@ -210,6 +219,7 @@ private:
     std::unique_ptr<ChatSummaryStore> chatSummaryStore_;
     std::unique_ptr<RepoStore> repoStore_;
     std::unique_ptr<WorkspaceStore> workspaceStore_;
+    std::unique_ptr<TempPermissionStore> tempPermissionStore_;
     std::unique_ptr<PromptTemplateStore> promptTemplateStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;

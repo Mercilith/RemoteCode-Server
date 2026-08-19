@@ -51,6 +51,22 @@ public:
     // definition in the failed state (mirrors RepoStore::SetError).
     bool SetError(const std::string& id, const std::string& lastError, int64_t updatedAt);
 
+    // A workspace agent joining after the workspace is already "active" (via
+    // the add_agent_to_workspace MCP tool, which runs in the MCP subprocess
+    // with no live Discord connection) needs its bot granted access to the
+    // already-existing Discord channel — a step only the main process (which
+    // owns the real DiscordBot) can perform. AddPendingAgentGrant records
+    // that this still needs doing; Orchestrator::SyncPendingWorkspaceAgentGrants
+    // polls ListPendingAgentGrants (same "housekeeping poll" pattern as
+    // ListPendingDiscordSetup) and calls ClearPendingAgentGrant once done.
+    struct PendingAgentGrant {
+        std::string workspaceId;
+        std::string agentId;
+    };
+    bool AddPendingAgentGrant(const std::string& workspaceId, const std::string& agentId, int64_t createdAt);
+    std::vector<PendingAgentGrant> ListPendingAgentGrants();
+    bool ClearPendingAgentGrant(const std::string& workspaceId, const std::string& agentId);
+
 private:
     Database& db_;
 };

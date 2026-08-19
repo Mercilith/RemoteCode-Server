@@ -7,6 +7,7 @@
 #include "db/PromptTemplateStore.h"
 #include "db/RepoStore.h"
 #include "db/Schema.h"
+#include "db/TempPermissionStore.h"
 #include "db/WorkspaceStore.h"
 #include "mcp/McpServer.h"
 #include "service/ServiceMain.h"
@@ -66,11 +67,12 @@ bool TryRunMcpServer(int argc, wchar_t* argv[]) {
     PromptTemplateStore promptTemplateStore(db);
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
     const std::string narrowAgentId = NarrowAscii(agentId);
     ActivityLog activityLog(logDir, "mcp-" + narrowAgentId);
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
-        narrowAgentId, NarrowAscii(chatId));
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        activityLog, narrowAgentId, NarrowAscii(chatId));
     server.RunStdio();
     return true;
 }

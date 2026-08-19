@@ -60,28 +60,6 @@ bool ContainsCaseInsensitive(const std::string& haystack, const std::string& nee
     return lowerHaystack.find(lowerNeedle) != std::string::npos;
 }
 
-// %ProgramData%\RemoteCode\Workspaces\<workspaceId>\<repoId> — mirrors
-// Orchestrator.cpp's RepoLocalPath (%ProgramData%\RemoteCode\Repos\<repoId>)
-// convention exactly, one directory level deeper for the workspace id.
-// Returns an empty wstring if %ProgramData% can't be resolved.
-std::wstring WorkspaceRepoPath(const std::string& workspaceId, const std::string& repoId) {
-    PWSTR programData = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &programData)) ||
-        programData == nullptr) {
-        if (programData != nullptr) {
-            CoTaskMemFree(programData);
-        }
-        return L"";
-    }
-    const std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\Workspaces\\" +
-                              AsciiToWide(workspaceId) + L"\\" + AsciiToWide(repoId);
-    CoTaskMemFree(programData);
-
-    std::error_code ec;
-    fs::create_directories(fs::path(dir).parent_path(), ec); // ensure ...\Workspaces\<id>\ exists
-    return dir;
-}
-
 // Case-insensitive match of `token` against a repo's id, or the org/repo or
 // bare repo name parsed out of its githubUrl — same spirit as
 // Orchestrator::ResolveActiveAgentByNameOrId's id-or-slugified-name rule.
@@ -213,7 +191,7 @@ void ExpandWithHeuristicDependencies(
 // WorkspaceCreator.h's comment on why CreateWorkspace needs to tolerate
 // being re-invoked for the same workspace id.
 bool AddWorktree(const Repo& repo, const std::string& workspaceId, std::string& outPath, std::string& outError) {
-    const std::wstring targetPath = WorkspaceRepoPath(workspaceId, repo.id);
+    const std::wstring targetPath = RepoWorktreePath(workspaceId, repo.id);
     if (targetPath.empty()) {
         outError = "could not resolve %ProgramData% to determine the worktree destination";
         return false;
@@ -225,7 +203,7 @@ bool AddWorktree(const Repo& repo, const std::string& workspaceId, std::string& 
         return true; // already set up — idempotent no-op
     }
 
-    const std::string branch = "workspace/" + workspaceId + "/" + repo.id;
+    const std::string branch = RepoWorktreeBranch(workspaceId, repo.id);
     const std::wstring commandLine = L"git worktree add \"" + targetPath + L"\" -b \"" +
                                       AsciiToWide(branch) + L"\"";
 
@@ -244,6 +222,28 @@ bool AddWorktree(const Repo& repo, const std::string& workspaceId, std::string& 
 }
 
 } // namespace
+
+std::wstring RepoWorktreePath(const std::string& workspaceId, const std::string& repoId) {
+    PWSTR programData = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_ProgramData, 0, nullptr, &programData)) ||
+        programData == nullptr) {
+        if (programData != nullptr) {
+            CoTaskMemFree(programData);
+        }
+        return L"";
+    }
+    const std::wstring dir = std::wstring(programData) + L"\\RemoteCode\\Workspaces\\" +
+                              AsciiToWide(workspaceId) + L"\\" + AsciiToWide(repoId);
+    CoTaskMemFree(programData);
+
+    std::error_code ec;
+    fs::create_directories(fs::path(dir).parent_path(), ec); // ensure ...\Workspaces\<id>\ exists
+    return dir;
+}
+
+std::string RepoWorktreeBranch(const std::string& workspaceId, const std::string& repoId) {
+    return "workspace/" + workspaceId + "/" + repoId;
+}
 
 Result Create(
     RepoStore& repoStore, WorkspaceStore& workspaceStore, ChatStore& chatStore,

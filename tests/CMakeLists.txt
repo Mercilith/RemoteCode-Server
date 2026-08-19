@@ -10,11 +10,13 @@ add_executable(RemoteCodeServerTests
     ${CMAKE_SOURCE_DIR}/src/db/ChatSummaryStore.cpp
     ${CMAKE_SOURCE_DIR}/src/db/RepoStore.cpp
     ${CMAKE_SOURCE_DIR}/src/db/WorkspaceStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/db/TempPermissionStore.cpp
     ${CMAKE_SOURCE_DIR}/src/db/PromptTemplateStore.cpp
     ${CMAKE_SOURCE_DIR}/src/config/Secrets.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/McpServer.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/Tools.cpp
     ${CMAKE_SOURCE_DIR}/src/orchestrator/WorkspaceCreator.cpp
+    ${CMAKE_SOURCE_DIR}/src/orchestrator/WorkspacePr.cpp
     ${CMAKE_SOURCE_DIR}/src/util/Text.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ActivityLog.cpp
     ${CMAKE_SOURCE_DIR}/src/util/Mentions.cpp

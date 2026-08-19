@@ -7,6 +7,7 @@
 #include "../db/ChatStore.h"
 #include "../db/PromptTemplateStore.h"
 #include "../db/RepoStore.h"
+#include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
 #include "../third_party/json.hpp"
 #include "../util/ActivityLog.h"
@@ -24,6 +25,9 @@ struct ToolContext {
     // subprocess call, same rule.
     RepoStore& repoStore;
     WorkspaceStore& workspaceStore;
+    // Backs the request_temporary_permission tool — see IsAlwaysAllowedTool
+    // and the HasActiveGrant/Consume fallback in Tools::Call.
+    TempPermissionStore& tempPermissionStore;
     ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default

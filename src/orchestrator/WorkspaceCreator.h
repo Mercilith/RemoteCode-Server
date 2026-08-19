@@ -51,4 +51,15 @@ Result Create(
     const std::vector<std::string>& repoIdsOrNames, const std::string& title,
     const std::string& requestedByAgentId);
 
+// The exact "%ProgramData%\RemoteCode\Workspaces\<workspaceId>\<repoId>"
+// worktree path and "workspace/<workspaceId>/<repoId>" branch name Create()
+// uses internally when it runs `git worktree add` — exported so a later,
+// separate operation on that same worktree (see orchestrator/WorkspacePr.h's
+// PR-creation flow) can recompute both deterministically rather than needing
+// them persisted anywhere. Returns an empty wstring if %ProgramData% can't be
+// resolved; also ensures the parent "...\Workspaces\<workspaceId>\" directory
+// exists, same as the internal caller inside Create() relies on.
+std::wstring RepoWorktreePath(const std::string& workspaceId, const std::string& repoId);
+std::string RepoWorktreeBranch(const std::string& workspaceId, const std::string& repoId);
+
 } // namespace WorkspaceCreator

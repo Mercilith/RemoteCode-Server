@@ -5,6 +5,7 @@
 #include <sstream>
 
 #include "../orchestrator/WorkspaceCreator.h"
+#include "../orchestrator/WorkspacePr.h"
 #include "../util/Mentions.h"
 #include "../util/Text.h"
 
@@ -575,6 +576,207 @@ json CreateWorkspaceTool(ToolContext& ctx, const json& arguments, std::string& o
     };
 }
 
+// DB-only, same split as CreateWorkspaceTool — this tool runs in the MCP
+// subprocess with no live Discord connection, so granting the joining
+// agent's own bot access to the workspace's already-existing channel has to
+// happen back on the main process; see WorkspaceStore::AddPendingAgentGrant
+// and Orchestrator::SyncPendingWorkspaceAgentGrants.
+json AddAgentToWorkspace(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("workspace_id") || !arguments.contains("agent_id")) {
+        outError = "add_agent_to_workspace requires 'workspace_id' and 'agent_id'";
+        return {};
+    }
+    const std::string workspaceId = arguments["workspace_id"].get<std::string>();
+    const std::string targetAgentId = arguments["agent_id"].get<std::string>();
+
+    Workspace workspace;
+    if (!ctx.workspaceStore.Get(workspaceId, workspace)) {
+        outError = "add_agent_to_workspace: no workspace with id '" + workspaceId + "'";
+        return {};
+    }
+    Agent target;
+    if (!ctx.agentStore.Get(targetAgentId, target) || target.status != "active") {
+        outError = "add_agent_to_workspace: '" + targetAgentId + "' is not a known, active agent";
+        return {};
+    }
+    if (ctx.chatStore.IsParticipant(workspace.chatId, "agent", targetAgentId)) {
+        outError = "'" + targetAgentId + "' is already part of workspace '" + workspaceId + "'";
+        return {};
+    }
+
+    Agent caller;
+    if (!ctx.agentStore.Get(ctx.agentId, caller)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+    if (!Mentions::IsAllowedToMessage(caller, targetAgentId)) {
+        outError = "add_agent_to_workspace: you are not allowed to message '" + targetAgentId +
+                    "' (see can_message)";
+        return {};
+    }
+
+    ctx.chatStore.AddParticipant(workspace.chatId, "agent", targetAgentId);
+    // New workspace participants default to listening-only — the same rule
+    // a workspace's initial participants get (see WorkspaceCreator::Create):
+    // they gather context but only take a turn once explicitly @-tagged,
+    // until Cardon or an agent with permission flips them to auto_respond.
+    ctx.chatStore.SetParticipantMode(workspace.chatId, "agent", targetAgentId, ParticipantMode::kListening);
+    ctx.workspaceStore.AddPendingAgentGrant(workspaceId, targetAgentId, static_cast<int64_t>(time(nullptr)));
+
+    return json{{"workspace_id", workspaceId}, {"agent_id", targetAgentId}, {"status", "added"}};
+}
+
+// Every real tool name this server knows — used to validate
+// request_temporary_permission's tool_name argument. Kept as a flat list
+// (rather than deriving it from Tools::Definitions()) since this function
+// already has to be updated by hand whenever a new tool is added anyway
+// (Definitions() and the dispatch chain in Tools::Call both do too).
+// request_temporary_permission itself is deliberately excluded — it's
+// already unconditionally available (see IsAlwaysAllowedTool below), so
+// requesting temporary access to it would be meaningless.
+bool IsKnownToolName(const std::string& name) {
+    static const std::vector<std::string> kKnown = {
+        "post_message",     "read_chat",         "message_user",        "submit_agent_for_approval",
+        "update_agent",     "remember",          "list_agents",         "list_my_chats",
+        "start_chat",       "request_add_agent_to_chat", "get_prompt_template", "update_prompt_template",
+        "create_workspace", "add_agent_to_workspace",    "create_pull_request",
+    };
+    return std::find(kKnown.begin(), kKnown.end(), name) != kKnown.end();
+}
+
+json RequestTemporaryPermission(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("tool_name") || !arguments.contains("reason")) {
+        outError = "request_temporary_permission requires 'tool_name' and 'reason'";
+        return {};
+    }
+    const std::string toolName = arguments["tool_name"].get<std::string>();
+    if (!IsKnownToolName(toolName)) {
+        outError = "request_temporary_permission: '" + toolName + "' is not a real tool name";
+        return {};
+    }
+    if (ctx.chatId.empty()) {
+        outError = "request_temporary_permission has no current chat to request into";
+        return {};
+    }
+
+    Agent caller;
+    if (!ctx.agentStore.Get(ctx.agentId, caller)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+    json permissions;
+    try {
+        permissions = json::parse(caller.toolPermissionsJson);
+    } catch (const json::parse_error&) {
+        permissions = json::array();
+    }
+    if (permissions.is_array() && std::find(permissions.begin(), permissions.end(), toolName) != permissions.end()) {
+        return json{{"status", "already_permitted"}, {"tool_name", toolName}};
+    }
+
+    const std::string reason = arguments["reason"].get<std::string>();
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+
+    std::ostringstream summary;
+    summary << "**" << caller.name << " requests one-time use of '" << toolName << "'**\n" << reason
+            << "\n\nReact with \xE2\x9C\x85 to approve or \xE2\x9D\x8C to reject.";
+
+    Message message;
+    message.chatId = ctx.chatId;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "approval_request";
+    message.content = summary.str();
+    message.createdAt = now;
+    const int64_t messageId = ctx.chatStore.InsertMessage(message);
+    if (messageId < 0) {
+        outError = "failed to record the approval request message";
+        return {};
+    }
+
+    // "temp_tool_permission" is a third approval kind — reuses the same
+    // free-text kind/payload shape as add_agent_to_chat/create_agent (see
+    // ApprovalStore.h); Orchestrator::HandleReaction knows how to interpret
+    // this specific payload shape (agent_id + tool_name) on approval.
+    Approval approval;
+    approval.id = "approval-temp-" + ctx.agentId + "-" + toolName + "-" + std::to_string(now);
+    approval.chatId = ctx.chatId;
+    approval.messageId = messageId;
+    approval.requestedBy = ctx.agentId;
+    approval.kind = "temp_tool_permission";
+    approval.payloadJson = json{{"agent_id", ctx.agentId}, {"tool_name", toolName}}.dump();
+    approval.status = "pending";
+    approval.createdAt = now;
+    if (!ctx.approvalStore.Create(approval)) {
+        outError = "failed to record the approval";
+        return {};
+    }
+
+    return json{{"status", "pending_approval"}, {"tool_name", toolName}};
+}
+
+// Pushes the workspace repo's worktree branch and opens a PR via `gh` — see
+// orchestrator/WorkspacePr.h. The actual git/gh subprocess work happens
+// there (plain programmatic calls, never an agent turn); this tool is just
+// argument validation plus a call into it. Unlike create_workspace/
+// add_agent_to_workspace, this genuinely needs to run synchronously here in
+// the MCP subprocess (not deferred to the main process) since it has no
+// Discord side effect to defer — git push and gh pr create work the same
+// regardless of which process calls them, so there's no reason to split it
+// the way the Discord-touching tools have to be.
+json CreatePullRequestTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("workspace_id") || !arguments.contains("repo_id") || !arguments.contains("title") ||
+        !arguments.contains("body")) {
+        outError = "create_pull_request requires 'workspace_id', 'repo_id', 'title', and 'body'";
+        return {};
+    }
+    const std::string workspaceId = arguments["workspace_id"].get<std::string>();
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const std::string title = arguments["title"].get<std::string>();
+    const std::string body = arguments["body"].get<std::string>();
+    const std::string baseBranch = arguments.value("base_branch", "");
+
+    Workspace workspace;
+    if (!ctx.workspaceStore.Get(workspaceId, workspace)) {
+        outError = "create_pull_request: no workspace with id '" + workspaceId + "'";
+        return {};
+    }
+    json workspaceRepoIds;
+    try {
+        workspaceRepoIds = json::parse(workspace.repoIdsJson);
+    } catch (const json::parse_error&) {
+        workspaceRepoIds = json::array();
+    }
+    if (!workspaceRepoIds.is_array() ||
+        std::find(workspaceRepoIds.begin(), workspaceRepoIds.end(), repoId) == workspaceRepoIds.end()) {
+        outError = "create_pull_request: '" + repoId + "' is not part of workspace '" + workspaceId + "'";
+        return {};
+    }
+    Repo repo;
+    if (!ctx.repoStore.Get(repoId, repo)) {
+        outError = "create_pull_request: unknown repo '" + repoId + "'";
+        return {};
+    }
+
+    const WorkspacePr::Result result = WorkspacePr::Create(workspaceId, repoId, title, body, baseBranch);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"pr_url", result.prUrl}, {"workspace_id", workspaceId}, {"repo_id", repoId}};
+}
+
+// Memory tools (currently just remember) and request_temporary_permission
+// itself are available to every agent regardless of tool_permissions —
+// gating memory behind a permission serves no real safety purpose (it's
+// private per-agent state, see AgentStore::SetFact/GetFact, not something
+// that touches Discord, other agents, or the filesystem), and
+// request_temporary_permission has to be universally callable or an agent
+// that lacks everything else would have no way to ask for anything either.
+bool IsAlwaysAllowedTool(const std::string& toolName) {
+    return toolName == "remember" || toolName == "request_temporary_permission";
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -804,6 +1006,66 @@ json Tools::Definitions() {
                  {"required", json::array({"repo_ids_or_names"})},
              }},
         },
+        {
+            {"name", "add_agent_to_workspace"},
+            {"description",
+             "Add another agent to an existing workspace's conversation. The added agent defaults to "
+             "listening mode — it gathers context but won't actually respond until it's explicitly "
+             "@-tagged, or someone changes it to auto_respond via update_agent. Subject to the same "
+             "can_message rule as request_add_agent_to_chat: you can only add an agent you're allowed "
+             "to message."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"workspace_id", {{"type", "string"}}},
+                      {"agent_id", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"workspace_id", "agent_id"})},
+             }},
+        },
+        {
+            {"name", "request_temporary_permission"},
+            {"description",
+             "Ask Cardon for one-time use of a tool you don't currently have permission to call — posts "
+             "a request with checkmark/cross reactions. If approved, your very next call to that tool "
+             "succeeds regardless of your normal tool_permissions, and the grant is then consumed — it "
+             "does not persist, and does not change your permanent tool_permissions (ask Cardon or an "
+             "agent holding update_agent for that instead). Available to every agent unconditionally, "
+             "unlike every other tool here."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"tool_name", {{"type", "string"}, {"description", "The exact tool name you need."}}},
+                      {"reason", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"tool_name", "reason"})},
+             }},
+        },
+        {
+            {"name", "create_pull_request"},
+            {"description",
+             "Push a workspace repo's worktree branch and open a pull request for it via the gh CLI. "
+             "Commit your work in the worktree first (via your Bash tool access — repo-linked agents get "
+             "that automatically) — this only pushes and opens the PR, it does not commit anything for "
+             "you. base_branch defaults to 'main' if omitted."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"workspace_id", {{"type", "string"}}},
+                      {"repo_id", {{"type", "string"}}},
+                      {"title", {{"type", "string"}}},
+                      {"body", {{"type", "string"}}},
+                      {"base_branch", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"workspace_id", "repo_id", "title", "body"})},
+             }},
+        },
     });
 }
 
@@ -836,8 +1098,16 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
 
     Agent agent;
     bool permitted = false;
+    // Set when `permitted` came from a one-time grant (request_temporary_
+    // permission) rather than agent.tool_permissions — burned via
+    // ctx.tempPermissionStore.Consume below once the call actually succeeds,
+    // never on a validation failure inside the tool itself (bad args
+    // shouldn't cost the agent its one shot).
+    bool usedTempGrant = false;
     if (!ctx.agentStore.Get(ctx.agentId, agent)) {
         outError = "unknown agent: " + ctx.agentId;
+    } else if (IsAlwaysAllowedTool(toolName)) {
+        permitted = true;
     } else {
         json permissions;
         try {
@@ -847,6 +1117,10 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         }
         permitted = permissions.is_array() &&
                     std::find(permissions.begin(), permissions.end(), toolName) != permissions.end();
+        if (!permitted) {
+            permitted = ctx.tempPermissionStore.HasActiveGrant(ctx.agentId, toolName);
+            usedTempGrant = permitted;
+        }
         if (!permitted) {
             outError = "agent '" + ctx.agentId + "' is not permitted to call tool '" + toolName + "'";
         }
@@ -885,6 +1159,12 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = UpdatePromptTemplate(ctx, arguments, outError);
     } else if (toolName == "create_workspace") {
         result = CreateWorkspaceTool(ctx, arguments, outError);
+    } else if (toolName == "add_agent_to_workspace") {
+        result = AddAgentToWorkspace(ctx, arguments, outError);
+    } else if (toolName == "request_temporary_permission") {
+        result = RequestTemporaryPermission(ctx, arguments, outError);
+    } else if (toolName == "create_pull_request") {
+        result = CreatePullRequestTool(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }
@@ -893,6 +1173,9 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_error", json{{"tool", toolName}, {"error", outError}});
     } else {
         ctx.activityLog.Log(ctx.chatId, ctx.agentId, "tool_result", json{{"tool", toolName}, {"result", result}});
+        if (usedTempGrant) {
+            ctx.tempPermissionStore.Consume(ctx.agentId, toolName, static_cast<int64_t>(time(nullptr)));
+        }
     }
     return result;
 }

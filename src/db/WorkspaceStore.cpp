@@ -140,3 +140,40 @@ bool WorkspaceStore::SetError(const std::string& id, const std::string& lastErro
     stmt.Step();
     return stmt.Ok();
 }
+
+bool WorkspaceStore::AddPendingAgentGrant(
+    const std::string& workspaceId, const std::string& agentId, int64_t createdAt) {
+    Statement stmt(
+        db_, "INSERT INTO workspace_agent_grants (workspace_id, agent_id, created_at) VALUES (?1,?2,?3);");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, workspaceId);
+    stmt.BindText(2, agentId);
+    stmt.BindInt64(3, createdAt);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+std::vector<WorkspaceStore::PendingAgentGrant> WorkspaceStore::ListPendingAgentGrants() {
+    std::vector<PendingAgentGrant> grants;
+    Statement stmt(db_, "SELECT workspace_id, agent_id FROM workspace_agent_grants ORDER BY created_at ASC;");
+    if (!stmt.Valid()) {
+        return grants;
+    }
+    while (stmt.Step()) {
+        grants.push_back(PendingAgentGrant{stmt.ColumnText(0), stmt.ColumnText(1)});
+    }
+    return grants;
+}
+
+bool WorkspaceStore::ClearPendingAgentGrant(const std::string& workspaceId, const std::string& agentId) {
+    Statement stmt(db_, "DELETE FROM workspace_agent_grants WHERE workspace_id = ?1 AND agent_id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, workspaceId);
+    stmt.BindText(2, agentId);
+    stmt.Step();
+    return stmt.Ok();
+}

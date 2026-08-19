@@ -136,6 +136,23 @@ CREATE TABLE IF NOT EXISTS workspaces (
     updated_at           INTEGER NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS temp_tool_grants (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id     TEXT NOT NULL,
+    tool_name    TEXT NOT NULL,
+    granted_at   INTEGER NOT NULL,
+    consumed_at  INTEGER
+);
+)sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS workspace_agent_grants (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id  TEXT NOT NULL,
+    agent_id      TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace
