@@ -404,7 +404,9 @@ void AdminServer::Run(int port) {
 
     server_->Get("/debug/chats", [this](const httplib::Request&, httplib::Response& res) {
         json out = json::array();
-        for (const Chat& chat : chatStore_.ListChats()) {
+        // includeArchived=true — this is a debug view, nothing should
+        // silently disappear from it once a chat is closed/archived.
+        for (const Chat& chat : chatStore_.ListChats(/*includeArchived=*/true)) {
             out.push_back(json{
                 {"id", chat.id},
                 {"title", chat.title},

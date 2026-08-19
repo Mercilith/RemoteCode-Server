@@ -79,12 +79,15 @@ bool ChatStore::GetChat(const std::string& chatId, Chat& outChat) {
     return true;
 }
 
-std::vector<Chat> ChatStore::ListChats() {
+std::vector<Chat> ChatStore::ListChats(bool includeArchived) {
     std::vector<Chat> chats;
     Statement stmt(
         db_,
-        "SELECT id, title, created_by, status, discord_channel_id, created_at FROM chats "
-        "ORDER BY created_at DESC;");
+        includeArchived
+            ? "SELECT id, title, created_by, status, discord_channel_id, created_at FROM chats "
+              "ORDER BY created_at DESC;"
+            : "SELECT id, title, created_by, status, discord_channel_id, created_at FROM chats "
+              "WHERE status != 'archived' ORDER BY created_at DESC;");
     if (!stmt.Valid()) {
         return chats;
     }
@@ -101,13 +104,18 @@ std::vector<Chat> ChatStore::ListChats() {
     return chats;
 }
 
-std::vector<Chat> ChatStore::ListChatsForParticipant(const std::string& participantId) {
+std::vector<Chat> ChatStore::ListChatsForParticipant(const std::string& participantId, bool includeArchived) {
     std::vector<Chat> chats;
     Statement stmt(
         db_,
-        "SELECT c.id, c.title, c.created_by, c.status, c.discord_channel_id, c.created_at "
-        "FROM chats c JOIN chat_participants p ON p.chat_id = c.id "
-        "WHERE p.participant_type = 'agent' AND p.participant_id = ?1 ORDER BY c.created_at ASC;");
+        includeArchived
+            ? "SELECT c.id, c.title, c.created_by, c.status, c.discord_channel_id, c.created_at "
+              "FROM chats c JOIN chat_participants p ON p.chat_id = c.id "
+              "WHERE p.participant_type = 'agent' AND p.participant_id = ?1 ORDER BY c.created_at ASC;"
+            : "SELECT c.id, c.title, c.created_by, c.status, c.discord_channel_id, c.created_at "
+              "FROM chats c JOIN chat_participants p ON p.chat_id = c.id "
+              "WHERE p.participant_type = 'agent' AND p.participant_id = ?1 AND c.status != 'archived' "
+              "ORDER BY c.created_at ASC;");
     if (!stmt.Valid()) {
         return chats;
     }
@@ -138,6 +146,10 @@ bool ChatStore::SetChatDiscordChannel(const std::string& chatId, const std::stri
 
 bool ChatStore::AddParticipant(
     const std::string& chatId, const std::string& participantType, const std::string& participantId) {
+    // mode is left to its schema default ('auto_respond') — INSERT OR IGNORE
+    // means an already-existing row (e.g. re-adding a participant who was
+    // previously flipped to 'listening') keeps its current mode rather than
+    // being reset, since the INSERT is simply skipped.
     Statement stmt(
         db_,
         "INSERT OR IGNORE INTO chat_participants (chat_id, participant_type, participant_id, "
@@ -149,6 +161,21 @@ bool ChatStore::AddParticipant(
     stmt.BindText(2, participantType);
     stmt.BindText(3, participantId);
     stmt.BindInt64(4, static_cast<int64_t>(time(nullptr)));
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool ChatStore::RemoveParticipant(
+    const std::string& chatId, const std::string& participantType, const std::string& participantId) {
+    Statement stmt(
+        db_,
+        "DELETE FROM chat_participants WHERE chat_id = ?1 AND participant_type = ?2 AND participant_id = ?3;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, chatId);
+    stmt.BindText(2, participantType);
+    stmt.BindText(3, participantId);
     stmt.Step();
     return stmt.Ok();
 }
@@ -181,6 +208,56 @@ std::vector<std::string> ChatStore::ListParticipantAgentIds(const std::string& c
         ids.push_back(stmt.ColumnText(0));
     }
     return ids;
+}
+
+std::vector<ParticipantAgent> ChatStore::ListParticipantAgents(const std::string& chatId) {
+    std::vector<ParticipantAgent> result;
+    Statement stmt(
+        db_,
+        "SELECT participant_id, mode FROM chat_participants WHERE chat_id = ?1 AND participant_type = 'agent';");
+    if (!stmt.Valid()) {
+        return result;
+    }
+    stmt.BindText(1, chatId);
+    while (stmt.Step()) {
+        ParticipantAgent pa;
+        pa.agentId = stmt.ColumnText(0);
+        pa.mode = stmt.ColumnText(1);
+        if (pa.mode.empty()) {
+            pa.mode = ParticipantMode::kAutoRespond;
+        }
+        result.push_back(std::move(pa));
+    }
+    return result;
+}
+
+bool ChatStore::SetParticipantMode(
+    const std::string& chatId, const std::string& participantType, const std::string& participantId,
+    const std::string& mode) {
+    Statement stmt(
+        db_,
+        "UPDATE chat_participants SET mode = ?1 WHERE chat_id = ?2 AND participant_type = ?3 "
+        "AND participant_id = ?4;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, mode);
+    stmt.BindText(2, chatId);
+    stmt.BindText(3, participantType);
+    stmt.BindText(4, participantId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool ChatStore::SetChatStatus(const std::string& chatId, const std::string& status) {
+    Statement stmt(db_, "UPDATE chats SET status = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, status);
+    stmt.BindText(2, chatId);
+    stmt.Step();
+    return stmt.Ok();
 }
 
 int64_t ChatStore::InsertMessage(const Message& message) {

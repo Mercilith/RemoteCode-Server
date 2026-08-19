@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS chat_participants (
     participant_id  TEXT NOT NULL,
     joined_at       INTEGER NOT NULL,
     muted           INTEGER NOT NULL DEFAULT 0,
+    mode            TEXT NOT NULL DEFAULT 'auto_respond',
     PRIMARY KEY (chat_id, participant_type, participant_id)
 );
 )sql",
@@ -145,6 +146,16 @@ bool Schema::EnsureCreated(Database& db) {
         return false;
     }
     if (!EnsureColumn(db, "agents", "repo_local_path", "TEXT")) {
+        return false;
+    }
+    // "listening" participant mode (chat lifecycle feature): a participant
+    // whose mode is 'listening' still gets every message appended to the
+    // chat's stored history (so it has full context whenever it DOES take a
+    // turn), but Orchestrator::HandleIncomingMessage only actually queues a
+    // turn for it when explicitly @-tagged, not on every message the way
+    // 'auto_respond' (the default) participants are. See ChatStore::
+    // SetParticipantMode/ListParticipantAgents.
+    if (!EnsureColumn(db, "chat_participants", "mode", "TEXT NOT NULL DEFAULT 'auto_respond'")) {
         return false;
     }
 

@@ -11,8 +11,14 @@ struct Approval {
     std::string chatId;
     int64_t messageId = 0; // messages.id this approval's draft is attached to
     std::string requestedBy; // agent id that requested it
-    std::string kind;        // "create_agent" this pass
-    std::string payloadJson; // e.g. {"agent_id": "..."} for create_agent
+    std::string kind;        // "create_agent" | "add_agent_to_chat"
+    std::string payloadJson; // e.g. {"agent_id": "..."} for create_agent, or
+                              // {"chat_id": "...", "target_agent_id": "..."}
+                              // for add_agent_to_chat. Free-form JSON on
+                              // purpose — no schema change needed per new
+                              // approval kind, only a new `kind` value and a
+                              // payload shape Orchestrator::HandleReaction
+                              // knows how to interpret.
     std::string status;      // "pending" | "approved" | "rejected"
     int64_t createdAt = 0;
     int64_t resolvedAt = 0; // 0 if unresolved
