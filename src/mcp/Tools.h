@@ -6,6 +6,8 @@
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 #include "../db/PromptTemplateStore.h"
+#include "../db/RepoStore.h"
+#include "../db/WorkspaceStore.h"
 #include "../third_party/json.hpp"
 #include "../util/ActivityLog.h"
 
@@ -16,6 +18,12 @@ struct ToolContext {
     AgentStore& agentStore;
     ApprovalStore& approvalStore;
     PromptTemplateStore& promptTemplateStore;
+    // Read-only from a tool's point of view (repo import/cloning itself is
+    // never delegated to an LLM — see Orchestrator::AddRepo) except for
+    // create_workspace's git-worktree-add step, which is a plain programmatic
+    // subprocess call, same rule.
+    RepoStore& repoStore;
+    WorkspaceStore& workspaceStore;
     ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default

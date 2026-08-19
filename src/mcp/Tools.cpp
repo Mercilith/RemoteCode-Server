@@ -4,6 +4,7 @@
 #include <ctime>
 #include <sstream>
 
+#include "../orchestrator/WorkspaceCreator.h"
 #include "../util/Mentions.h"
 #include "../util/Text.h"
 
@@ -486,6 +487,55 @@ json UpdatePromptTemplate(ToolContext& ctx, const json& arguments, std::string& 
     return json{{"name", name}, {"content", content}};
 }
 
+// Runs the same core as /create-workspace (see orchestrator/WorkspaceCreator.h
+// and Orchestrator::CreateWorkspace) but WITHOUT the Discord category/channel
+// creation — this tool runs inside the MCP subprocess (spawned per agent
+// turn, see main.cpp's --mcp-server mode), which has only a Database handle
+// onto the shared SQLite file and no live Discord connection at all. The
+// workspace's chat is left with an empty discord_channel_id and the
+// workspace row's status stays "ready"; Orchestrator::EnsurePendingWorkspaceChannels
+// (polled after every HandleIncomingMessage, back on the main process where
+// a real DiscordBot exists) picks it up and creates the category/channel
+// shortly afterward.
+json CreateWorkspaceTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_ids_or_names") || !arguments["repo_ids_or_names"].is_array() ||
+        arguments["repo_ids_or_names"].empty()) {
+        outError = "create_workspace requires a non-empty 'repo_ids_or_names' array";
+        return {};
+    }
+
+    std::vector<std::string> repoTokens;
+    for (const json& tokenVal : arguments["repo_ids_or_names"]) {
+        if (!tokenVal.is_string()) {
+            outError = "create_workspace: 'repo_ids_or_names' entries must be strings";
+            return {};
+        }
+        repoTokens.push_back(tokenVal.get<std::string>());
+    }
+    const std::string title = arguments.value("title", "");
+
+    const WorkspaceCreator::Result result =
+        WorkspaceCreator::Create(ctx.repoStore, ctx.workspaceStore, ctx.chatStore, repoTokens, title, ctx.agentId);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+
+    json repoIds = json::array();
+    for (const std::string& id : result.repoIds) {
+        repoIds.push_back(id);
+    }
+    return json{
+        {"workspace_id", result.workspaceId},
+        {"chat_id", result.chatId},
+        {"repo_ids", repoIds},
+        {"status", "ready"},
+        {"note",
+         "Worktrees and the chat are set up; the Discord category/channel are being created and will "
+         "appear shortly."},
+    };
+}
+
 } // namespace
 
 json Tools::Definitions() {
@@ -688,6 +738,30 @@ json Tools::Definitions() {
                  {"required", json::array({"name", "content"})},
              }},
         },
+        {
+            {"name", "create_workspace"},
+            {"description",
+             "Create a workspace: a git worktree of each given already-imported repo, all living "
+             "together, plus a new private Discord category with an initial conversation channel. Any "
+             "other already-imported repo whose manifest (package.json/pubspec.yaml/CMakeLists.txt/"
+             "*.csproj) mentions one of the requested repos by name is pulled in automatically as a "
+             "best-effort dependency guess. Each involved repo's dedicated agent is added to the initial "
+             "conversation in listening mode. Use this when asked to work across multiple related repos "
+             "at once (e.g. fixing a bug that spans a project and its dependency)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_ids_or_names",
+                       {{"type", "array"},
+                        {"items", {{"type", "string"}}},
+                        {"description", "Already-imported repo ids or names, e.g. [\"my-org__my-repo\"]."}}},
+                      {"title", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"repo_ids_or_names"})},
+             }},
+        },
     });
 }
 
@@ -767,6 +841,8 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = GetPromptTemplate(ctx, arguments, outError);
     } else if (toolName == "update_prompt_template") {
         result = UpdatePromptTemplate(ctx, arguments, outError);
+    } else if (toolName == "create_workspace") {
+        result = CreateWorkspaceTool(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }

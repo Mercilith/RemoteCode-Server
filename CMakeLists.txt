@@ -79,6 +79,7 @@ add_executable(RemoteCodeServer
     src/db/AgentSessionStore.cpp
     src/db/ChatSummaryStore.cpp
     src/db/RepoStore.cpp
+    src/db/WorkspaceStore.cpp
     src/db/PromptTemplateStore.cpp
     src/config/ServerConfig.cpp
     src/config/Secrets.cpp
@@ -94,6 +95,7 @@ add_executable(RemoteCodeServer
     src/util/ProcessRunner.cpp
     src/orchestrator/AgentTurn.cpp
     src/orchestrator/Orchestrator.cpp
+    src/orchestrator/WorkspaceCreator.cpp
 )
 
 target_include_directories(RemoteCodeServer PRIVATE src "${cpp_httplib_SOURCE_DIR}")

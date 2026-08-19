@@ -20,6 +20,7 @@
 #include "../util/ProcessRunner.h"
 #include "../util/Text.h"
 #include "AgentTurn.h"
+#include "WorkspaceCreator.h"
 
 using nlohmann::json;
 
@@ -193,6 +194,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     agentSessionStore_ = std::make_unique<AgentSessionStore>(*db_);
     chatSummaryStore_ = std::make_unique<ChatSummaryStore>(*db_);
     repoStore_ = std::make_unique<RepoStore>(*db_);
+    workspaceStore_ = std::make_unique<WorkspaceStore>(*db_);
     promptTemplateStore_ = std::make_unique<PromptTemplateStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
     promptTemplateStore_->SeedDefaultsIfEmpty();
@@ -281,6 +283,10 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         // already happened before this callback fires.
         std::thread([this, channelId]() { HandleSlashCommandCloseChat(channelId); }).detach();
     });
+    discordBot_->SetSlashCommandCreateWorkspaceHandler(
+        [this](const std::string& reposRaw, const std::string& title) {
+            return HandleSlashCommandCreateWorkspace(reposRaw, title);
+        });
 
     // discordBot_->Stop() is the one mechanism used both for a real
     // shutdown and for a watchdog-triggered reconnect — `stopping` is what
@@ -767,6 +773,11 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     // live Discord connection) — post any such drafts now that we're back
     // on the orchestrator's own thread with a real DiscordBot.
     PostPendingApprovals();
+
+    // Same rationale as PostPendingApprovals above — a turn may have called
+    // create_workspace, which (also being MCP-subprocess-only) can only do
+    // the DB/filesystem half of the work.
+    EnsurePendingWorkspaceChannels();
 
     // Best-effort summary housekeeping — once per HandleIncomingMessage
     // call (not once per agent turn above), after real dispatch is done.
@@ -1315,5 +1326,115 @@ void Orchestrator::HandleSlashCommandCloseChat(const std::string& channelId) {
              AsciiToWide(chat.id) +
              L"' (bot may lack Manage Channels there, or the channel was already gone) — the chat is "
              L"archived regardless.");
+    }
+}
+
+std::string Orchestrator::CreateWorkspace(
+    const std::vector<std::string>& repoIdsOrNames, const std::string& title,
+    const std::string& requestedByAgentId, std::string& outError) {
+    const WorkspaceCreator::Result result = WorkspaceCreator::Create(
+        *repoStore_, *workspaceStore_, *chatStore_, repoIdsOrNames, title, requestedByAgentId);
+    if (!result.ok) {
+        outError = result.error;
+        return "";
+    }
+
+    // The DB/filesystem half is done — attempt the Discord half right away
+    // (this is the synchronous, in-process path: either Cardon's slash
+    // command, or a rare direct C++ caller). If it fails here (missing
+    // guild/owner config, a transient Discord API error, ...) the workspace
+    // is left in "ready" status and EnsurePendingWorkspaceChannels will keep
+    // retrying it on every subsequent HandleIncomingMessage call, same as
+    // if it had come from the MCP tool path.
+    if (!EnsureWorkspaceDiscordAssets(result.workspaceId)) {
+        log_(L"Orchestrator: workspace '" + AsciiToWide(result.workspaceId) +
+             L"' created, but its Discord category/channel could not be (yet) — will keep retrying.");
+    }
+    return result.workspaceId;
+}
+
+std::string Orchestrator::HandleSlashCommandCreateWorkspace(const std::string& reposRaw, const std::string& title) {
+    // SplitAgentTokens is generic (space/comma/tab/newline splitting) despite
+    // its name — reused here for the repos option rather than duplicating
+    // the same handful of lines under a repo-specific name.
+    const std::vector<std::string> tokens = SplitAgentTokens(reposRaw);
+    if (tokens.empty()) {
+        return "/create-workspace needs at least one repo (space or comma separated names/ids).";
+    }
+
+    std::string error;
+    const std::string workspaceId = CreateWorkspace(tokens, title, /*requestedByAgentId=*/"", error);
+    if (workspaceId.empty()) {
+        return "Failed to create the workspace: " + error;
+    }
+
+    Workspace workspace;
+    if (!workspaceStore_->Get(workspaceId, workspace)) {
+        return "Workspace '" + workspaceId + "' was created.";
+    }
+    Chat chat;
+    if (chatStore_->GetChat(workspace.chatId, chat) && !chat.discordChannelId.empty()) {
+        return "Created workspace '" + workspaceId + "': <#" + chat.discordChannelId + ">";
+    }
+    return "Created workspace '" + workspaceId +
+           "' — its Discord channel is still being set up, check back shortly.";
+}
+
+bool Orchestrator::EnsureWorkspaceDiscordAssets(const std::string& workspaceId) {
+    Workspace workspace;
+    if (!workspaceStore_->Get(workspaceId, workspace)) {
+        return false;
+    }
+    if (discordGuildId_.empty() || discordOwnerUserId_.empty()) {
+        log_(L"Orchestrator: workspace '" + AsciiToWide(workspaceId) + L"' needs a private Discord category, "
+             L"but no discord_owner_user_id/discord_guild_id is configured (see config/ServerConfig.h).");
+        return false;
+    }
+
+    Chat chat;
+    if (!chatStore_->GetChat(workspace.chatId, chat)) {
+        return false;
+    }
+
+    // Every involved repo's dedicated agent gets access, same rule
+    // EnsureChannelForChat uses for an ordinary multi-agent chat.
+    std::vector<std::string> extraBotUserIds;
+    for (const std::string& agentId : chatStore_->ListParticipantAgentIds(workspace.chatId)) {
+        Agent agent;
+        if (agentStore_->Get(agentId, agent) && agent.status == "active") {
+            extraBotUserIds.push_back(agent.discordBotUserId);
+        }
+    }
+
+    std::string categoryId = workspace.discordCategoryId;
+    if (categoryId.empty()) {
+        const std::string categoryName = Slugify(workspace.title.empty() ? workspace.id : workspace.title);
+        categoryId = discordBot_->CreateCategory(discordGuildId_, categoryName, discordOwnerUserId_, extraBotUserIds);
+        if (categoryId.empty()) {
+            log_(L"Orchestrator: failed to create a Discord category for workspace '" + AsciiToWide(workspaceId) +
+                 L"'.");
+            return false;
+        }
+        workspaceStore_->SetDiscordCategoryId(workspaceId, categoryId, static_cast<int64_t>(time(nullptr)));
+    }
+
+    if (chat.discordChannelId.empty()) {
+        const std::string channelId = discordBot_->CreateDmChannel(
+            discordGuildId_, "general", discordOwnerUserId_, extraBotUserIds, categoryId);
+        if (channelId.empty()) {
+            log_(L"Orchestrator: workspace '" + AsciiToWide(workspaceId) +
+                 L"' has its category, but its initial channel could not be created.");
+            return false;
+        }
+        chatStore_->SetChatDiscordChannel(workspace.chatId, channelId);
+    }
+
+    workspaceStore_->SetStatus(workspaceId, "active", static_cast<int64_t>(time(nullptr)));
+    return true;
+}
+
+void Orchestrator::EnsurePendingWorkspaceChannels() {
+    for (const Workspace& workspace : workspaceStore_->ListPendingDiscordSetup()) {
+        EnsureWorkspaceDiscordAssets(workspace.id); // best-effort — logs and keeps retrying on failure
     }
 }

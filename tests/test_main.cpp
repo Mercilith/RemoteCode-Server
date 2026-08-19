@@ -11,8 +11,10 @@
 #include "../src/db/PromptTemplateStore.h"
 #include "../src/db/RepoStore.h"
 #include "../src/db/Schema.h"
+#include "../src/db/WorkspaceStore.h"
 #include "../src/greeting.h"
 #include "../src/mcp/McpServer.h"
+#include "../src/orchestrator/WorkspaceCreator.h"
 #include "../src/third_party/json.hpp"
 #include "../src/util/ActivityLog.h"
 #include "../src/util/GitHubRepo.h"
@@ -404,6 +406,8 @@ void TestMcpServer() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -415,7 +419,9 @@ void TestMcpServer() {
     SeedTestAgent(agentStore, "alex", {"post_message", "read_chat"});
 
     ActivityLog activityLog(L"test-logs", "test-mcp");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
     Check(
@@ -428,7 +434,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 12, "McpServer: tools/list returns exactly 12 tools");
+    Check(tools.is_array() && tools.size() == 13, "McpServer: tools/list returns exactly 13 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -482,6 +488,8 @@ void TestApprovalWorkflowTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -493,7 +501,9 @@ void TestApprovalWorkflowTool() {
     SeedTestAgent(agentStore, "alex", {"submit_agent_for_approval"});
 
     ActivityLog activityLog(L"test-logs", "test-approval");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string submitCall = json{
         {"jsonrpc", "2.0"},
@@ -548,6 +558,8 @@ void TestMessageUserTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -559,7 +571,9 @@ void TestMessageUserTool() {
     SeedTestAgent(agentStore, "alex", {"message_user"});
 
     ActivityLog activityLog(L"test-logs", "test-message-user");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string messageUserCall = json{
         {"jsonrpc", "2.0"},
@@ -600,6 +614,8 @@ void TestUpdateAgentTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Agent target;
     target.id = "target-agent";
@@ -616,7 +632,9 @@ void TestUpdateAgentTool() {
     SeedTestAgent(agentStore, "alex", {"update_agent"});
 
     ActivityLog activityLog(L"test-logs", "test-update");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string updateCall = json{
         {"jsonrpc", "2.0"},
@@ -658,6 +676,8 @@ void TestToolPermissionEnforcement() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -671,7 +691,9 @@ void TestToolPermissionEnforcement() {
     SeedTestAgent(agentStore, "alex", {});
 
     ActivityLog activityLog(L"test-logs", "test-permission-denied");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string postCall = json{
         {"jsonrpc", "2.0"},
@@ -696,7 +718,8 @@ void TestToolPermissionEnforcement() {
     // Unknown agent id (no row at all) must also fail closed, not crash.
     ActivityLog activityLog2(L"test-logs", "test-permission-unknown-agent");
     McpServer serverUnknownAgent(
-        chatStore, agentStore, approvalStore, promptTemplateStore, activityLog2, "nobody", "chat-1");
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog2,
+        "nobody", "chat-1");
     const json unknownAgentResponse = json::parse(serverUnknownAgent.HandleLine(postCall));
     Check(
         unknownAgentResponse["result"]["isError"] == true,
@@ -711,10 +734,14 @@ void TestRememberTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
     SeedTestAgent(agentStore, "alex", {"remember"});
 
     ActivityLog activityLog(L"test-logs", "test-remember");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string rememberCall = json{
         {"jsonrpc", "2.0"},
@@ -741,6 +768,8 @@ void TestListAgentsTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
     SeedTestAgent(agentStore, "alex", {"list_agents"});
 
     Agent disabled;
@@ -757,7 +786,9 @@ void TestListAgentsTool() {
     agentStore.Upsert(disabled);
 
     ActivityLog activityLog(L"test-logs", "test-list-agents");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string listCall = json{
         {"jsonrpc", "2.0"},
@@ -782,6 +813,8 @@ void TestStartChatAndListMyChatsTools() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     // Seed the calling agent (alex) plus two targets, one alex is allowed to
     // message and one it isn't — start_chat's can_message check needs real
@@ -848,7 +881,9 @@ void TestStartChatAndListMyChatsTools() {
     agentStore.Upsert(alexNoCharlie);
 
     ActivityLog activityLog(L"test-logs", "test-start-chat");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     // can_message rejection path: charlie isn't in alex's can_message.
     const std::string rejectedCall = json{
@@ -1121,6 +1156,206 @@ void TestRepoStore() {
     Check(all.size() == 2, "RepoStore: ListAll returns every repo");
 }
 
+void TestWorkspaceStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    WorkspaceStore store(db);
+
+    Workspace missing;
+    Check(!store.Get("no-such-workspace", missing), "WorkspaceStore: Get returns false for an unknown id");
+
+    Workspace workspace;
+    workspace.id = "workspace-widgets-1";
+    workspace.title = "Widgets bugfix";
+    workspace.repoIdsJson = R"(["acme__widgets"])";
+    workspace.chatId = "workspace-chat-workspace-widgets-1";
+    workspace.createdBy = "user";
+    workspace.status = "ready";
+    workspace.createdAt = 1;
+    workspace.updatedAt = 1;
+    Check(store.Create(workspace), "WorkspaceStore: Create succeeds");
+
+    Workspace fetched;
+    Check(store.Get("workspace-widgets-1", fetched), "WorkspaceStore: Get finds the created workspace");
+    Check(
+        fetched.title == "Widgets bugfix" && fetched.repoIdsJson == R"(["acme__widgets"])" &&
+            fetched.chatId == workspace.chatId && fetched.status == "ready" &&
+            fetched.discordCategoryId.empty() && fetched.lastError.empty(),
+        "WorkspaceStore: round-tripped fields match, discord_category_id/last_error empty by default");
+
+    const std::vector<Workspace> pendingBefore = store.ListPendingDiscordSetup();
+    Check(
+        pendingBefore.size() == 1 && pendingBefore[0].id == "workspace-widgets-1",
+        "WorkspaceStore: ListPendingDiscordSetup finds a 'ready' workspace");
+
+    Check(
+        store.SetDiscordCategoryId("workspace-widgets-1", "999", 2), "WorkspaceStore: SetDiscordCategoryId succeeds");
+    Workspace afterCategory;
+    store.Get("workspace-widgets-1", afterCategory);
+    Check(
+        afterCategory.discordCategoryId == "999" && afterCategory.updatedAt == 2,
+        "WorkspaceStore: SetDiscordCategoryId round-trips");
+
+    Check(store.SetStatus("workspace-widgets-1", "active", 3), "WorkspaceStore: SetStatus succeeds");
+    Check(
+        store.ListPendingDiscordSetup().empty(),
+        "WorkspaceStore: an 'active' workspace no longer shows up as pending Discord setup");
+
+    Check(
+        store.SetError("workspace-widgets-1", "git worktree add failed", 4), "WorkspaceStore: SetError succeeds");
+    Workspace afterError;
+    store.Get("workspace-widgets-1", afterError);
+    Check(
+        afterError.status == "failed" && afterError.lastError == "git worktree add failed",
+        "WorkspaceStore: SetError also sets status to 'failed'");
+
+    Workspace second;
+    second.id = "workspace-other-1";
+    second.repoIdsJson = "[]";
+    second.chatId = "workspace-chat-other-1";
+    second.createdBy = "tyrell";
+    second.status = "creating";
+    second.createdAt = 5;
+    second.updatedAt = 5;
+    Check(store.Create(second), "WorkspaceStore: Create a second workspace");
+    Check(store.ListAll().size() == 2, "WorkspaceStore: ListAll returns every workspace");
+}
+
+void TestWorkspaceCreatorValidation() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+
+    // Empty request is rejected before anything else is touched.
+    const WorkspaceCreator::Result emptyResult =
+        WorkspaceCreator::Create(repoStore, workspaceStore, chatStore, {}, "", "");
+    Check(!emptyResult.ok && !emptyResult.error.empty(), "WorkspaceCreator: rejects an empty repo list");
+
+    // A token that doesn't resolve to any known repo is rejected outright.
+    const WorkspaceCreator::Result unknownResult =
+        WorkspaceCreator::Create(repoStore, workspaceStore, chatStore, {"no-such-repo"}, "", "");
+    Check(
+        !unknownResult.ok && unknownResult.error.find("unknown repo") != std::string::npos,
+        "WorkspaceCreator: rejects a repo token that doesn't resolve to any imported repo");
+    Check(workspaceStore.ListAll().empty(), "WorkspaceCreator: an unresolved-repo failure writes no workspace row");
+
+    // A known repo that hasn't finished cloning yet is also rejected — same
+    // "already-imported" bar RunRepoOnboarding uses.
+    Repo cloning;
+    cloning.id = "acme__widgets";
+    cloning.githubUrl = "https://github.com/acme/widgets";
+    cloning.localPath = "C:\\ProgramData\\RemoteCode\\Repos\\acme__widgets";
+    cloning.status = "cloning";
+    cloning.createdAt = 1;
+    cloning.updatedAt = 1;
+    repoStore.Create(cloning);
+
+    const WorkspaceCreator::Result cloningResult =
+        WorkspaceCreator::Create(repoStore, workspaceStore, chatStore, {"acme__widgets"}, "", "");
+    Check(
+        !cloningResult.ok && cloningResult.error.find("no local clone yet") != std::string::npos,
+        "WorkspaceCreator: rejects a repo that's still cloning (no usable local clone yet)");
+
+    // Resolving by the bare repo name (not just the exact repo id) must work
+    // too — same id-or-name rule /create-workspace's free-text option relies
+    // on.
+    repoStore.SetStatus("acme__widgets", "active", 2);
+    Repo active;
+    repoStore.Get("acme__widgets", active);
+    Check(active.status == "active", "WorkspaceCreator test setup: repo is now 'active'");
+    // (Actual worktree creation needs a real git repo on disk, which this
+    // hermetic unit test deliberately doesn't set up — see WorkspaceCreator.h
+    // for why that's a separate, Discord-touching concern left to
+    // Orchestrator/manual verification. This test only exercises the
+    // validation that runs before any subprocess/filesystem work begins.)
+}
+
+void TestCreateWorkspaceToolValidation() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    ActivityLog activityLog(L"test-logs", "test-create-workspace");
+
+    // No permission granted at all — must fail closed like every other tool.
+    SeedTestAgent(agentStore, "tyrell", {"post_message"});
+    McpServer serverNoPermission(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "tyrell", "chat-1");
+    const std::string createCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "create_workspace"}, {"arguments", {{"repo_ids_or_names", json::array({"acme__widgets"})}}}}},
+    }.dump();
+    const json noPermissionResponse = json::parse(serverNoPermission.HandleLine(createCall));
+    Check(
+        noPermissionResponse["result"]["isError"] == true,
+        "create_workspace: fails closed for an agent without the create_workspace permission");
+
+    // Permitted, but with a missing/empty repo_ids_or_names — rejected by the
+    // tool's own argument validation before WorkspaceCreator ever runs.
+    SeedTestAgent(agentStore, "tyrell", {"create_workspace"});
+    ActivityLog activityLog2(L"test-logs", "test-create-workspace-2");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog2,
+        "tyrell", "chat-1");
+
+    const std::string missingArgCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "create_workspace"}, {"arguments", json::object()}}},
+    }.dump();
+    const json missingArgResponse = json::parse(server.HandleLine(missingArgCall));
+    Check(
+        missingArgResponse["result"]["isError"] == true,
+        "create_workspace: rejects a call with no repo_ids_or_names");
+
+    const std::string emptyArrayCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params", {{"name", "create_workspace"}, {"arguments", {{"repo_ids_or_names", json::array()}}}}},
+    }.dump();
+    const json emptyArrayResponse = json::parse(server.HandleLine(emptyArrayCall));
+    Check(
+        emptyArrayResponse["result"]["isError"] == true,
+        "create_workspace: rejects a call with an empty repo_ids_or_names array");
+
+    // Permitted, well-formed, but the repo doesn't exist — surfaces
+    // WorkspaceCreator's own resolution error through the tool.
+    const json unknownRepoResponse = json::parse(server.HandleLine(createCall));
+    Check(
+        unknownRepoResponse["result"]["isError"] == true,
+        "create_workspace: surfaces WorkspaceCreator's 'unknown repo' error through the tool");
+    const std::string unknownRepoErrorText = unknownRepoResponse["result"]["content"][0]["text"].get<std::string>();
+    Check(
+        unknownRepoErrorText.find("unknown repo") != std::string::npos,
+        "create_workspace: the tool error message names the actual problem, not a generic failure");
+
+    Check(workspaceStore.ListAll().empty(), "create_workspace: no failed call left behind a workspace row");
+}
+
 void TestPromptTemplateStore() {
     Database db;
     db.Open(L":memory:");
@@ -1173,11 +1408,15 @@ void TestPromptTemplateMcpTools() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
     promptTemplateStore.SeedDefaultsIfEmpty();
     SeedTestAgent(agentStore, "alex", {"get_prompt_template", "update_prompt_template"});
 
     ActivityLog activityLog(L"test-logs", "test-prompt-templates");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string getCall = json{
         {"jsonrpc", "2.0"},
@@ -1326,6 +1565,8 @@ void TestRequestAddAgentToChatTool() {
     AgentStore agentStore(db);
     ApprovalStore approvalStore(db);
     PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -1347,7 +1588,9 @@ void TestRequestAddAgentToChatTool() {
     SeedTestAgent(agentStore, "bob", {});
 
     ActivityLog activityLog(L"test-logs", "test-request-add-agent");
-    McpServer server(chatStore, agentStore, approvalStore, promptTemplateStore, activityLog, "alex", "chat-1");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, activityLog,
+        "alex", "chat-1");
 
     const std::string requestCall = json{
         {"jsonrpc", "2.0"},
@@ -1419,6 +1662,9 @@ int main() {
     TestChunkForDiscord();
     TestGitHubRepoParseGitHubUrl();
     TestRepoStore();
+    TestWorkspaceStore();
+    TestWorkspaceCreatorValidation();
+    TestCreateWorkspaceToolValidation();
     TestPromptTemplateStore();
     TestPromptTemplateMcpTools();
 
