@@ -3,12 +3,14 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "../db/AgentSessionStore.h"
 #include "../db/AgentStore.h"
 #include "../db/ChatStore.h"
 #include "../db/PromptTemplateStore.h"
 #include "../db/RepoStore.h"
+#include "../db/WorkspaceStore.h"
 #include "../third_party/json.hpp"
 
 namespace httplib {
@@ -26,6 +28,12 @@ using InjectMessageFn = std::function<nlohmann::json(
 // string with outError set if githubUrl didn't parse.
 using AddRepoFn = std::function<std::string(
     const std::string& githubUrl, const std::string& notes, std::string& outError)>;
+
+// Callback into Orchestrator::CreateWorkspace — same rationale as AddRepoFn
+// above. Returns the new workspace's id, or an empty string with outError
+// set on failure (unknown repo id/name, worktree creation failure, etc).
+using CreateWorkspaceFn = std::function<std::string(
+    const std::vector<std::string>& repoIdsOrNames, const std::string& title, std::string& outError)>;
 
 // Local-only (127.0.0.1) HTTP admin API for RemoteCode-Desktop: list/
 // create/update agents, assign or clear a per-agent Discord bot token, and
@@ -49,9 +57,9 @@ public:
     // AdminServer as a member).
     AdminServer(
         AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
-        RepoStore& repoStore, PromptTemplateStore& promptTemplateStore, std::wstring dbPath,
-        std::string claudeConfigDir, std::wstring logDir, InjectMessageFn injectMessage,
-        AddRepoFn addRepo);
+        RepoStore& repoStore, WorkspaceStore& workspaceStore, PromptTemplateStore& promptTemplateStore,
+        std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
+        InjectMessageFn injectMessage, AddRepoFn addRepo, CreateWorkspaceFn createWorkspace);
     ~AdminServer();
 
     AdminServer(const AdminServer&) = delete;
@@ -66,12 +74,14 @@ private:
     AgentSessionStore& agentSessionStore_;
     ChatStore& chatStore_;
     RepoStore& repoStore_;
+    WorkspaceStore& workspaceStore_;
     PromptTemplateStore& promptTemplateStore_;
     std::wstring dbPath_;
     std::string claudeConfigDir_;
     std::wstring logDir_;
     InjectMessageFn injectMessage_;
     AddRepoFn addRepo_;
+    CreateWorkspaceFn createWorkspace_;
     std::unique_ptr<httplib::Server> server_;
 };
 

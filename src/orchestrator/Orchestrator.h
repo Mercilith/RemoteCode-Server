@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 #include <windows.h>
 
 #include "../db/AgentSessionStore.h"
@@ -155,6 +156,18 @@ private:
     // kMaxAgentChainTurns. Agent-to-agent follow-ups never wait on Discord:
     // the queue is driven entirely by what's in the DB.
     void HandleIncomingMessage(const std::string& chatId);
+    // If `content` @tags an active agent who isn't already in
+    // `participantIds`, adds them as a chat_participants row (mode
+    // "listening") and appends them to `participantIds`/`participants`/
+    // `participantModes` in place — so a message tagging a teammate who
+    // hasn't joined yet pulls them in automatically instead of the tag
+    // silently failing to resolve (mentions only ever match against the
+    // roster already passed to Mentions::ParseMentions). Matches against
+    // every active agent, not just current participants. Skipped for
+    // "dm-"-prefixed chats — those are always exactly one agent, by design.
+    void EnsureMentionedParticipantsJoined(
+        const std::string& chatId, const std::string& content, std::vector<std::string>& participantIds,
+        std::vector<Agent>& participants, std::unordered_map<std::string, std::string>& participantModes);
     // Trailing agent-authored messages in `chatId` since the last
     // user-authored one — the turn-limit guard's counter.
     int CountTrailingAgentTurns(const std::string& chatId);

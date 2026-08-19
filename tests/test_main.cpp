@@ -455,7 +455,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 16, "McpServer: tools/list returns exactly 16 tools");
+    Check(tools.is_array() && tools.size() == 17, "McpServer: tools/list returns exactly 17 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -2015,6 +2015,84 @@ void TestRequestTemporaryPermissionTool() {
         "the already-permitted short-circuit doesn't create a second approval");
 }
 
+void TestRequestNewToolTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    // request_new_tool is always allowed — deliberately NOT granted here, to
+    // prove that.
+    SeedTestAgent(agentStore, "tyrell", {});
+    chatStore.AddParticipant("chat-1", "agent", "tyrell");
+
+    ActivityLog activityLog(L"test-request-new-tool", "test-request-new-tool");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        activityLog, "tyrell", "chat-1");
+
+    const std::string call = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "request_new_tool"},
+          {"arguments",
+           {{"tool_name", "read_metrics"}, {"description", "I need to check server CPU usage."}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(call));
+    Check(
+        response["result"]["isError"] == false,
+        "request_new_tool succeeds even though tyrell holds no tool_permissions at all");
+    const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+    Check(result["status"] == "requested", "request_new_tool reports status 'requested'");
+    const std::string newChatId = result["chat_id"].get<std::string>();
+    Check(newChatId.rfind("toolreq-tyrell-", 0) == 0, "request_new_tool creates a toolreq-prefixed chat");
+
+    Chat createdChat;
+    Check(chatStore.GetChat(newChatId, createdChat), "the tool-request chat was actually created");
+    const std::vector<ParticipantAgent> participants = chatStore.ListParticipantAgents(newChatId);
+    Check(
+        participants.size() == 1 && participants[0].agentId == "tyrell" &&
+            participants[0].mode == ParticipantMode::kAutoRespond,
+        "tyrell is the sole auto_respond participant of the new tool-request chat");
+
+    const std::vector<Message> messages = chatStore.RecentMessages(newChatId, 10);
+    Check(
+        messages.size() == 1 && messages[0].content.find("read_metrics") != std::string::npos &&
+            messages[0].content.find("CPU usage") != std::string::npos,
+        "the request message names the proposed tool and carries the description");
+
+    // A second call creates a distinct chat, not a reused one.
+    const std::string secondCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "request_new_tool"}, {"arguments", {{"description", "Something else entirely."}}}}},
+    }.dump();
+    const json secondResponse = json::parse(server.HandleLine(secondCall));
+    Check(secondResponse["result"]["isError"] == false, "a second request_new_tool call also succeeds");
+    const json secondResult = json::parse(secondResponse["result"]["content"][0]["text"].get<std::string>());
+    Check(
+        secondResult["chat_id"].get<std::string>() != newChatId,
+        "a second request_new_tool call creates a brand-new chat, not the same one");
+}
+
 void TestAlwaysAllowedToolsAndTempGrantFallback() {
     Database db;
     db.Open(L":memory:");
@@ -2116,6 +2194,7 @@ int main() {
     RUN(TestRequestAddAgentToChatTool);
     RUN(TestAddAgentToWorkspaceTool);
     RUN(TestRequestTemporaryPermissionTool);
+    RUN(TestRequestNewToolTool);
     RUN(TestAlwaysAllowedToolsAndTempGrantFallback);
     RUN(TestMentions);
     RUN(TestChunkForDiscord);

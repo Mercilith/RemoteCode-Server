@@ -221,13 +221,16 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // Discord is set up, and /revise degrades gracefully (Alex just can't
     // post anywhere, but can still update the agent record).
     adminServer_ = std::make_unique<AdminServer>(
-        *agentStore_, *agentSessionStore_, *chatStore_, *repoStore_, *promptTemplateStore_, dbPath_,
-        claudeConfigDir_, logDir_,
+        *agentStore_, *agentSessionStore_, *chatStore_, *repoStore_, *workspaceStore_, *promptTemplateStore_,
+        dbPath_, claudeConfigDir_, logDir_,
         [this](const std::string& chatId, const std::string& content, const std::string& senderId) {
             return InjectTestMessage(chatId, content, senderId);
         },
         [this](const std::string& githubUrl, const std::string& notes, std::string& outError) {
             return AddRepo(githubUrl, notes, outError);
+        },
+        [this](const std::vector<std::string>& repoIdsOrNames, const std::string& title, std::string& outError) {
+            return CreateWorkspace(repoIdsOrNames, title, "", outError);
         });
     std::thread adminThread([this]() { adminServer_->Run(kAdminServerPort); });
     log_(L"Orchestrator: admin API listening on 127.0.0.1:" + std::to_wstring(kAdminServerPort) + L".");
@@ -525,6 +528,34 @@ void Orchestrator::RunRepoOnboarding(const std::string& repoId) {
     HandleIncomingMessage(onboardChatId);
 }
 
+void Orchestrator::EnsureMentionedParticipantsJoined(
+    const std::string& chatId, const std::string& content, std::vector<std::string>& participantIds,
+    std::vector<Agent>& participants, std::unordered_map<std::string, std::string>& participantModes) {
+    if (chatId.rfind("dm-", 0) == 0) {
+        return; // a DM chat is always exactly one agent — nothing to join
+    }
+    std::vector<Agent> allActive;
+    for (const Agent& a : agentStore_->ListAll()) {
+        if (a.status == "active") {
+            allActive.push_back(a);
+        }
+    }
+    for (const std::string& id : Mentions::ParseMentions(content, allActive)) {
+        if (std::find(participantIds.begin(), participantIds.end(), id) != participantIds.end()) {
+            continue; // already a participant
+        }
+        Agent agent;
+        if (!agentStore_->Get(id, agent) || !chatStore_->AddParticipant(chatId, "agent", id)) {
+            continue;
+        }
+        chatStore_->SetParticipantMode(chatId, "agent", id, ParticipantMode::kListening);
+        participantIds.push_back(id);
+        participants.push_back(agent);
+        participantModes[id] = ParticipantMode::kListening;
+        activityLog_->Log(chatId, id, "auto_joined_via_mention");
+    }
+}
+
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     Chat chat;
     if (!chatStore_->GetChat(chatId, chat)) {
@@ -594,6 +625,10 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     if (!latest.empty()) {
         triggeringContent = latest.back().content;
     }
+    // Pulls in anyone @tagged in the triggering message who isn't already a
+    // participant — covers both a human typing "@newAgent" in Discord and
+    // (via the mid-turn call further below) one agent tagging another.
+    EnsureMentionedParticipantsJoined(chatId, triggeringContent, participantIds, participants, participantModes);
     const std::vector<std::string> taggedInTrigger = Mentions::ParseMentions(triggeringContent, participants);
     for (const std::string& id : participantIds) {
         const bool tagged = std::find(taggedInTrigger.begin(), taggedInTrigger.end(), id) != taggedInTrigger.end();
@@ -773,7 +808,10 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             // reply), otherwise free to judge for itself. can_message isn't
             // consulted here: it gates explicit addressing (start_chat,
             // message_user's target), not "who's allowed to be in the
-            // room" for a chat everyone here already belongs to.
+            // room" for a chat everyone here already belongs to. An agent
+            // tagging a teammate who hasn't joined this chat yet pulls them
+            // in automatically, same as a human doing it from Discord.
+            EnsureMentionedParticipantsJoined(chatId, produced.content, participantIds, participants, participantModes);
             const std::vector<std::string> mentionedHere = Mentions::ParseMentions(produced.content, participants);
             for (const std::string& otherId : participantIds) {
                 if (otherId == produced.senderId) {

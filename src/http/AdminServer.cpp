@@ -52,6 +52,27 @@ json RepoToJson(const Repo& repo) {
     };
 }
 
+json WorkspaceToJson(const Workspace& workspace) {
+    json repoIds = json::array();
+    try {
+        repoIds = json::parse(workspace.repoIdsJson);
+    } catch (const json::parse_error&) {
+        repoIds = json::array();
+    }
+    return json{
+        {"id", workspace.id},
+        {"title", workspace.title},
+        {"repo_ids", repoIds},
+        {"discord_category_id", workspace.discordCategoryId},
+        {"chat_id", workspace.chatId},
+        {"created_by", workspace.createdBy},
+        {"status", workspace.status},
+        {"last_error", workspace.lastError},
+        {"created_at", workspace.createdAt},
+        {"updated_at", workspace.updatedAt},
+    };
+}
+
 json PromptTemplateToJson(const PromptTemplate& t) {
     return json{{"name", t.name}, {"content", t.content}, {"updated_at", t.updatedAt}};
 }
@@ -81,18 +102,21 @@ bool ParseBody(const httplib::Request& req, httplib::Response& res, json& outBod
 
 AdminServer::AdminServer(
     AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
-    RepoStore& repoStore, PromptTemplateStore& promptTemplateStore, std::wstring dbPath,
-    std::string claudeConfigDir, std::wstring logDir, InjectMessageFn injectMessage, AddRepoFn addRepo)
+    RepoStore& repoStore, WorkspaceStore& workspaceStore, PromptTemplateStore& promptTemplateStore,
+    std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
+    InjectMessageFn injectMessage, AddRepoFn addRepo, CreateWorkspaceFn createWorkspace)
     : agentStore_(agentStore),
       agentSessionStore_(agentSessionStore),
       chatStore_(chatStore),
       repoStore_(repoStore),
+      workspaceStore_(workspaceStore),
       promptTemplateStore_(promptTemplateStore),
       dbPath_(std::move(dbPath)),
       claudeConfigDir_(std::move(claudeConfigDir)),
       logDir_(std::move(logDir)),
       injectMessage_(std::move(injectMessage)),
-      addRepo_(std::move(addRepo)) {}
+      addRepo_(std::move(addRepo)),
+      createWorkspace_(std::move(createWorkspace)) {}
 
 AdminServer::~AdminServer() = default;
 
@@ -362,6 +386,60 @@ void AdminServer::Run(int port) {
             return;
         }
         SendJson(res, RepoToJson(repo));
+    });
+
+    // --- Workspace endpoints ---------------------------------------------
+
+    server_->Post("/workspaces", [this](const httplib::Request& req, httplib::Response& res) {
+        json body;
+        if (!ParseBody(req, res, body)) {
+            return;
+        }
+        if (!body.contains("repo_ids") || !body["repo_ids"].is_array() || body["repo_ids"].empty()) {
+            SendError(res, 400, "'repo_ids' must be a non-empty array");
+            return;
+        }
+        std::vector<std::string> repoIds;
+        for (const json& v : body["repo_ids"]) {
+            if (!v.is_string()) {
+                SendError(res, 400, "'repo_ids' entries must be strings");
+                return;
+            }
+            repoIds.push_back(v.get<std::string>());
+        }
+        const std::string title = body.value("title", std::string());
+
+        if (!createWorkspace_) {
+            SendError(res, 500, "workspace creation is not wired up");
+            return;
+        }
+        std::string error;
+        const std::string workspaceId = createWorkspace_(repoIds, title, error);
+        if (workspaceId.empty()) {
+            SendError(res, 400, error.empty() ? "could not create workspace" : error);
+            return;
+        }
+
+        Workspace workspace;
+        const std::string status = workspaceStore_.Get(workspaceId, workspace) ? workspace.status : "creating";
+        SendJson(res, json{{"id", workspaceId}, {"status", status}}, 201);
+    });
+
+    server_->Get("/workspaces", [this](const httplib::Request&, httplib::Response& res) {
+        json out = json::array();
+        for (const Workspace& workspace : workspaceStore_.ListAll()) {
+            out.push_back(WorkspaceToJson(workspace));
+        }
+        SendJson(res, out);
+    });
+
+    server_->Get("/workspaces/:id", [this](const httplib::Request& req, httplib::Response& res) {
+        Workspace workspace;
+        if (!workspaceStore_.Get(req.path_params.at("id"), workspace)) {
+            SendError(res, 404, "no workspace with that id");
+            return;
+        }
+        SendJson(res, WorkspaceToJson(workspace));
     });
 
     server_->Get("/prompt-templates", [this](const httplib::Request&, httplib::Response& res) {

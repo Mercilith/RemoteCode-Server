@@ -1,6 +1,7 @@
 #include "Tools.h"
 
 #include <algorithm>
+#include <atomic>
 #include <ctime>
 #include <sstream>
 
@@ -766,6 +767,71 @@ json CreatePullRequestTool(ToolContext& ctx, const json& arguments, std::string&
     return json{{"pr_url", result.prUrl}, {"workspace_id", workspaceId}, {"repo_id", repoId}};
 }
 
+// Available to every agent (see IsAlwaysAllowedTool) — an agent that finds
+// the existing toolset lacking (missing entirely, or too narrow for what
+// it's trying to do) uses this instead of silently failing or improvising.
+// Creates a brand-new chat/channel per request (never reused, unlike
+// message_user's DM) so each request gets its own discussion thread — set
+// to auto_respond (not the tag-only "listening" default new participants
+// otherwise get) since the whole point is Cardon can just reply there and
+// have the requesting agent engage without needing to @tag it first.
+json RequestNewTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("description")) {
+        outError = "request_new_tool requires 'description'";
+        return {};
+    }
+    const std::string description = arguments["description"].get<std::string>();
+    const std::string toolName = arguments.value("tool_name", std::string());
+
+    Agent caller;
+    if (!ctx.agentStore.Get(ctx.agentId, caller)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    // A counter (not just the timestamp) guards against two calls landing
+    // in the same second within one MCP subprocess — the timestamp alone
+    // isn't fine-grained enough to keep the chat id unique call-to-call.
+    static std::atomic<int> requestCounter{0};
+    Chat chat;
+    chat.id = "toolreq-" + ctx.agentId + "-" + std::to_string(now) + "-" + std::to_string(++requestCounter);
+    chat.title = "Tool request: " + (toolName.empty() ? std::string("(unnamed)") : toolName);
+    chat.createdBy = ctx.agentId;
+    chat.status = "active";
+    // discordChannelId left empty on purpose — same lazy-creation pattern as
+    // message_user/create_workspace; Orchestrator creates the real channel
+    // the first time this chat has something to mirror.
+    chat.createdAt = now;
+    if (!ctx.chatStore.CreateChat(chat)) {
+        outError = "failed to create the tool-request chat";
+        return {};
+    }
+    ctx.chatStore.AddParticipant(chat.id, "agent", ctx.agentId);
+    ctx.chatStore.SetParticipantMode(chat.id, "agent", ctx.agentId, ParticipantMode::kAutoRespond);
+
+    std::ostringstream summary;
+    summary << "**Tool request from " << caller.name << "**";
+    if (!toolName.empty()) {
+        summary << " — `" << toolName << "`";
+    }
+    summary << "\n" << description;
+
+    Message message;
+    message.chatId = chat.id;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "text";
+    message.content = summary.str();
+    message.createdAt = now;
+    const int64_t messageId = ctx.chatStore.InsertMessage(message);
+    if (messageId < 0) {
+        outError = "failed to record the tool request message";
+        return {};
+    }
+    return json{{"status", "requested"}, {"chat_id", chat.id}};
+}
+
 // Memory tools (currently just remember) and request_temporary_permission
 // itself are available to every agent regardless of tool_permissions —
 // gating memory behind a permission serves no real safety purpose (it's
@@ -774,7 +840,7 @@ json CreatePullRequestTool(ToolContext& ctx, const json& arguments, std::string&
 // request_temporary_permission has to be universally callable or an agent
 // that lacks everything else would have no way to ask for anything either.
 bool IsAlwaysAllowedTool(const std::string& toolName) {
-    return toolName == "remember" || toolName == "request_temporary_permission";
+    return toolName == "remember" || toolName == "request_temporary_permission" || toolName == "request_new_tool";
 }
 
 } // namespace
@@ -1066,6 +1132,31 @@ json Tools::Definitions() {
                  {"required", json::array({"workspace_id", "repo_id", "title", "body"})},
              }},
         },
+        {
+            {"name", "request_new_tool"},
+            {"description",
+             "Ask Cardon for a brand-new tool, or for an existing tool's functionality to be extended, "
+             "when nothing currently available covers what you're trying to do. Creates a fresh channel "
+             "just for this request so Cardon can discuss it with you, ask clarifying questions, or come "
+             "back to it later — you're free to keep talking there. Available to every agent "
+             "unconditionally, unlike every other tool here."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"tool_name",
+                       {{"type", "string"},
+                        {"description", "A short proposed name for the tool, if you have one in mind (optional)."}}},
+                      {"description",
+                       {{"type", "string"},
+                        {"description",
+                         "What you're trying to do and why nothing existing covers it — as much detail "
+                         "as would help Cardon decide whether/how to build it."}}},
+                  }},
+                 {"required", json::array({"description"})},
+             }},
+        },
     });
 }
 
@@ -1165,6 +1256,8 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = RequestTemporaryPermission(ctx, arguments, outError);
     } else if (toolName == "create_pull_request") {
         result = CreatePullRequestTool(ctx, arguments, outError);
+    } else if (toolName == "request_new_tool") {
+        result = RequestNewTool(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }
