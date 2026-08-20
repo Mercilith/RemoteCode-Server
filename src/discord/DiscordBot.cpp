@@ -53,6 +53,9 @@ void DiscordBot::SetSlashCommandCreateWorkspaceHandler(SlashCommandCreateWorkspa
 }
 
 void DiscordBot::Run() {
+    everReadyThisRun_ = false;
+    runStartedAt_ = time(nullptr);
+
     {
         std::lock_guard<std::mutex> lock(botMutex_);
         bot_ = std::make_unique<dpp::cluster>(token_, dpp::i_default_intents | dpp::i_message_content);
@@ -63,6 +66,7 @@ void DiscordBot::Run() {
     }
 
     bot_->on_ready([this](const dpp::ready_t&) {
+        everReadyThisRun_ = true;
         if (onLog_) {
             onLog_("Discord gateway ready.");
         }
@@ -133,6 +137,7 @@ void DiscordBot::Run() {
     bot_->on_slashcommand([this](const dpp::slashcommand_t& event) { HandleSlashCommand(event); });
 
     bot_->start(dpp::st_wait);
+    runStartedAt_ = 0; // Run() returned normally (Stop() was called) — nothing to watch until the next attempt
 }
 
 void DiscordBot::Stop() {
@@ -515,4 +520,16 @@ bool DiscordBot::IsZombied() const {
     // means several heartbeats in a row went unacknowledged.
     constexpr time_t kZombieThresholdSeconds = 90;
     return (time(nullptr) - shard->last_heartbeat_ack) > kZombieThresholdSeconds;
+}
+
+bool DiscordBot::IsStuckConnecting() const {
+    const time_t startedAt = runStartedAt_.load();
+    if (startedAt == 0 || everReadyThisRun_.load()) {
+        return false; // no attempt in flight, or it already succeeded
+    }
+    // A real connect (even a slow one) reaches on_ready within a few
+    // seconds; this is generous headroom for a normal cold start, not a
+    // tight timeout.
+    constexpr time_t kStuckConnectingThresholdSeconds = 60;
+    return (time(nullptr) - startedAt) > kStuckConnectingThresholdSeconds;
 }

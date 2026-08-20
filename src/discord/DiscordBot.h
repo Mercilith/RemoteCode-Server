@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -197,6 +199,19 @@ public:
     // it and force-reconnects when it goes true.
     bool IsZombied() const;
 
+    // True if this Run() attempt has been going for a while (see
+    // kStuckConnectingThresholdSeconds in the .cpp) without ever reaching
+    // on_ready — covers the gap IsZombied() leaves open (it explicitly
+    // returns false while "still (re)connecting"). Observed for real after a
+    // machine crash/reboot: the service's very first REST call to Discord
+    // hit "getaddrinfo: No such host is known" because Windows networking
+    // wasn't fully up yet when the auto-start service launched, and DPP's
+    // own retry logic for that specific failure never got the shard to
+    // ready — it just sat there silently, requiring a manual service
+    // restart. Orchestrator polls this alongside IsZombied() and
+    // force-reconnects the same way.
+    bool IsStuckConnecting() const;
+
 private:
     void HandleMessageCreate(const dpp::message_create_t& event);
     void HandleReactionAdd(const dpp::message_reaction_add_t& event);
@@ -232,4 +247,8 @@ private:
     // construction of the surrounding control flow, so isn't covered here.
     mutable std::mutex botMutex_;
     std::unique_ptr<dpp::cluster> bot_;
+    // Set to now() at the top of every Run() attempt, cleared (0) once
+    // on_ready fires for that attempt — see IsStuckConnecting() above.
+    std::atomic<time_t> runStartedAt_{0};
+    std::atomic<bool> everReadyThisRun_{false};
 };

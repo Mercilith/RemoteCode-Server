@@ -113,6 +113,7 @@ target_link_libraries(RemoteCodeServer PRIVATE
     advapi32
     shell32
     crypt32
+    ws2_32
     ${DPP_TARGET}
 )
 

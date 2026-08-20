@@ -1,6 +1,8 @@
 #include "Orchestrator.h"
 
 #include <shlobj.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include <algorithm>
 #include <atomic>
@@ -48,6 +50,34 @@ std::string WideToUtf8(const std::wstring& wide) {
     WideCharToMultiByte(
         CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), result.data(), size, nullptr, nullptr);
     return result;
+}
+
+// Resolves discord.com via a throwaway Winsock session — used to gate the
+// very first (and every re-)connect attempt so DPP never gets handed a
+// doomed request. Observed for real after a Windows crash/reboot: the
+// service's Automatic-start trigger fires before the network stack/DNS
+// resolver is actually usable, so the first REST call inside
+// dpp::cluster::start() failed with "getaddrinfo: No such host is known" and
+// DPP's own retry handling for that specific failure never recovered on its
+// own (see DiscordBot::IsStuckConnecting's comment) — required a manual
+// service restart. Self-contained WSAStartup/WSACleanup rather than relying
+// on DPP having already initialized Winsock, since this runs before the
+// first dpp::cluster is even constructed.
+bool CanResolveDiscordHost() {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return false;
+    }
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    const bool ok = getaddrinfo("discord.com", "443", &hints, &result) == 0;
+    if (result != nullptr) {
+        freeaddrinfo(result);
+    }
+    WSACleanup();
+    return ok;
 }
 
 // Used to decide whether an untagged agent's turn actually said something
@@ -307,6 +337,21 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
 
     std::thread discordThread([this, &stopping]() {
         while (!stopping.load()) {
+            // Don't hand DPP a doomed first REST call — wait for DNS to
+            // actually be usable first (see CanResolveDiscordHost's
+            // comment). A fresh boot right after a crash is the main case
+            // this guards, but it's cheap to check every attempt.
+            bool loggedWaiting = false;
+            while (!stopping.load() && !CanResolveDiscordHost()) {
+                if (!loggedWaiting) {
+                    log_(L"Orchestrator: network/DNS not ready yet — waiting before connecting to Discord...");
+                    loggedWaiting = true;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+            if (stopping.load()) {
+                break;
+            }
             log_(L"Orchestrator: connecting to Discord...");
             discordBot_->Run(); // blocks until Stop() is called
             if (stopping.load()) {
@@ -321,8 +366,14 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     // connected and keeps sending outbound heartbeats on its own timer, but
     // the remote end has silently stopped responding (observed after a bad
     // resume) — no crash, no disconnect event, just a connection that never
-    // delivers another message again. Poll for that and force a reconnect
-    // rather than requiring a manual service restart.
+    // delivers another message again. Also covers a connection that never
+    // got off the ground at all — observed after a Windows crash/reboot: the
+    // service's auto-start Run() attempt hit the network before DNS/routing
+    // was actually up ("getaddrinfo: No such host is known"), and DPP's own
+    // retry handling for that got stuck rather than ever reaching on_ready
+    // (IsZombied() explicitly excludes this case — see its comment). Poll
+    // for both and force a reconnect rather than requiring a manual service
+    // restart.
     std::thread watchdogThread([this, &stopping]() {
         while (!stopping.load()) {
             for (int i = 0; i < 30 && !stopping.load(); ++i) {
@@ -333,6 +384,10 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
             }
             if (discordBot_->IsZombied()) {
                 log_(L"Orchestrator: Discord connection looks zombied (no heartbeat ACK in a while) — "
+                     L"forcing a reconnect.");
+                discordBot_->Stop();
+            } else if (discordBot_->IsStuckConnecting()) {
+                log_(L"Orchestrator: Discord connection never came up (stuck since the last attempt) — "
                      L"forcing a reconnect.");
                 discordBot_->Stop();
             }
