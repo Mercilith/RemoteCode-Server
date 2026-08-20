@@ -114,6 +114,7 @@ target_link_libraries(RemoteCodeServer PRIVATE
     shell32
     crypt32
     ws2_32
+    user32
     ${DPP_TARGET}
 )
 

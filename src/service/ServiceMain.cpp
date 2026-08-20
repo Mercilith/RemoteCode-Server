@@ -177,9 +177,27 @@ int ServiceMain::Run() {
         return 1;
     }
 
-    // Not launched by the SCM — run the same loop directly for local
-    // debugging instead of requiring an install for every test run.
+    // Not launched by the SCM — run the same loop directly. This path now
+    // serves two very different callers with the same code: a developer
+    // running the exe by hand from an existing terminal for local
+    // debugging, and Task Scheduler launching it unattended at logon (see
+    // RemoteCode-Installer's ScheduledTask.cpp — RemoteCodeServer runs as a
+    // per-user logon task now, not a Windows Service, so it can see the
+    // user's real PATH/env vars and an interactive session). Both cases hit
+    // this same "no SCM" branch, but only the first one should show a
+    // window: since this is a console-subsystem exe, Windows auto-allocates
+    // a brand-new console for it whenever there's no parent console to
+    // inherit (Task Scheduler, or double-clicking it in Explorer), and that
+    // window would otherwise sit there visibly forever. Distinguish the two
+    // by asking how many processes are attached to our console —
+    // GetConsoleProcessList returns 1 only when we're the sole owner of a
+    // freshly-allocated one (nothing to inherit from), and >1 when we were
+    // launched from an existing shell (that shell + us).
     g_consoleMode = true;
+    DWORD consoleProcessIds[2];
+    if (GetConsoleProcessList(consoleProcessIds, 2) <= 1) {
+        ShowWindow(GetConsoleWindow(), SW_HIDE);
+    }
     g_shutdownEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (g_shutdownEvent == nullptr) {
         return 1;
