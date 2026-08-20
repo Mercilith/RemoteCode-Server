@@ -431,9 +431,16 @@ json ListMyChats(ToolContext& ctx, const json& /*arguments*/, std::string& /*out
 }
 
 json StartChat(ToolContext& ctx, const json& arguments, std::string& outError) {
-    if (!arguments.contains("participant_ids") || !arguments["participant_ids"].is_array() ||
-        arguments["participant_ids"].empty()) {
-        outError = "start_chat requires a non-empty 'participant_ids' array";
+    // participant_ids may be omitted or empty — a chat with just the
+    // calling agent (no other targets yet) is a legitimate starting point,
+    // e.g. when the caller knows other agents will join later via
+    // add_agent_to_chat/request_add_agent_to_chat but wants a real
+    // multi-agent-capable chat from the start rather than a DM (DMs are
+    // reserved for the single-agent case and Schema.cpp's cleanup migration
+    // assumes they never grow a second agent on their own — see its
+    // comment). If present, it must still be an array.
+    if (arguments.contains("participant_ids") && !arguments["participant_ids"].is_array()) {
+        outError = "start_chat: 'participant_ids' must be an array";
         return {};
     }
     if (!arguments.contains("initial_message")) {
@@ -451,7 +458,8 @@ json StartChat(ToolContext& ctx, const json& arguments, std::string& outError) {
     // silently dropping a bad id) if any target isn't a known, active agent
     // or the caller's can_message doesn't permit messaging them.
     std::vector<std::string> participantIds;
-    for (const json& idVal : arguments["participant_ids"]) {
+    const json participantIdsArg = arguments.value("participant_ids", json::array());
+    for (const json& idVal : participantIdsArg) {
         if (!idVal.is_string()) {
             outError = "start_chat: 'participant_ids' entries must be strings";
             return {};
@@ -1709,20 +1717,27 @@ json Tools::Definitions() {
         {
             {"name", "start_chat"},
             {"description",
-             "Start a new multi-agent chat with one or more other agents and post an initial message "
-             "into it. Every id in participant_ids must be a known, active agent that your can_message "
-             "permits messaging — the call is rejected outright if any target fails either check. "
-             "Returns the new chat's id (pass it as chat_id to post_message/read_chat afterward)."},
+             "Start a new multi-agent-capable chat and post an initial message into it. participant_ids "
+             "is optional and may be omitted or empty to start the chat with just yourself — useful when "
+             "you know other agents will join later (via add_agent_to_chat/request_add_agent_to_chat) but "
+             "want a real chat from the start rather than a DM, which is reserved for the single-agent "
+             "case and never grows a second agent on its own. Any id you do pass must be a known, active "
+             "agent that your can_message permits messaging — the call is rejected outright if any "
+             "target fails either check. Returns the new chat's id (pass it as chat_id to "
+             "post_message/read_chat afterward)."},
             {"inputSchema",
              {
                  {"type", "object"},
                  {"properties",
                   {
-                      {"participant_ids", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"participant_ids",
+                       {{"type", "array"},
+                        {"items", {{"type", "string"}}},
+                        {"description", "Optional — omit or leave empty to start with just yourself."}}},
                       {"title", {{"type", "string"}}},
                       {"initial_message", {{"type", "string"}}},
                   }},
-                 {"required", json::array({"participant_ids", "initial_message"})},
+                 {"required", json::array({"initial_message"})},
              }},
         },
         {

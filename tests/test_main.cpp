@@ -1399,6 +1399,74 @@ void TestStartChatAndListMyChatsTools() {
     Check(foundNewChat, "list_my_chats includes the chat start_chat just created");
 }
 
+void TestStartChatWithNoOtherParticipants() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+    SeedTestAgent(agentStore, "tyrell", {"start_chat"});
+
+    ActivityLog activityLog(L"test-logs", "test-start-chat-solo");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        "tyrell", "chat-1");
+
+    // Omitting participant_ids entirely must succeed — a chat with just the
+    // caller, meant to have other agents added later via add_agent_to_chat/
+    // request_add_agent_to_chat rather than starting as a DM.
+    const std::string omittedCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "start_chat"}, {"arguments", {{"initial_message", "starting solo"}}}}},
+    }.dump();
+    const json omittedResponse = json::parse(server.HandleLine(omittedCall));
+    Check(omittedResponse["result"]["isError"] == false, "start_chat succeeds with participant_ids omitted");
+    const json omittedResult = json::parse(omittedResponse["result"]["content"][0]["text"].get<std::string>());
+    const std::string omittedChatId = omittedResult.value("chat_id", "");
+    Check(!omittedChatId.empty(), "start_chat (omitted participant_ids) returns a new chat id");
+    Check(
+        chatStore.ListParticipantAgentIds(omittedChatId).size() == 1 &&
+            chatStore.IsParticipant(omittedChatId, "agent", "tyrell"),
+        "start_chat (omitted participant_ids) adds only the caller as a participant");
+
+    // An explicit empty array must succeed the same way.
+    const std::string emptyArrayCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "start_chat"},
+          {"arguments",
+           {{"participant_ids", json::array()},
+            {"title", "also solo"}, // distinct title so its id doesn't collide with the call above
+            {"initial_message", "also solo"}}}}},
+    }.dump();
+    const json emptyArrayResponse = json::parse(server.HandleLine(emptyArrayCall));
+    Check(
+        emptyArrayResponse["result"]["isError"] == false,
+        "start_chat succeeds with an explicit empty participant_ids array");
+
+    // A non-array participant_ids is still rejected.
+    const std::string badTypeCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "start_chat"}, {"arguments", {{"participant_ids", "not-an-array"}, {"initial_message", "x"}}}}},
+    }.dump();
+    const json badTypeResponse = json::parse(server.HandleLine(badTypeCall));
+    Check(badTypeResponse["result"]["isError"] == true, "start_chat rejects a non-array participant_ids");
+}
+
 void TestChunkForDiscord() {
     Check(
         ChunkForDiscord("short message").size() == 1 && ChunkForDiscord("short message")[0] == "short message",
@@ -3326,6 +3394,7 @@ int main() {
     RUN(TestListAgentsToolExposesPermissionsToUpdateAgentHolder);
     RUN(TestListAgentsToolFiltersByAgentIdAndSections);
     RUN(TestStartChatAndListMyChatsTools);
+    RUN(TestStartChatWithNoOtherParticipants);
     RUN(TestRequestAddAgentToChatTool);
     RUN(TestAddAgentToChatTool);
     RUN(TestAddAgentToWorkspaceTool);
