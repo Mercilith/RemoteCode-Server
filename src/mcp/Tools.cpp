@@ -8,6 +8,7 @@
 #include "../orchestrator/WorkspaceCreator.h"
 #include "../orchestrator/WorkspacePr.h"
 #include "../orchestrator/GitHubOps.h"
+#include "../orchestrator/RepoImport.h"
 #include "../util/GitHubRepo.h"
 #include "../util/Mentions.h"
 #include "../util/Text.h"
@@ -672,6 +673,9 @@ bool IsKnownToolName(const std::string& name) {
         "create_workspace", "add_agent_to_workspace",    "create_pull_request",
         "list_pull_requests", "get_pr_status",     "set_pr_status",       "merge_pull_request",
         "list_issues",       "create_issue",       "set_issue_status",
+        "list_repos",         "import_repo",        "create_repo",
+        "create_task",        "update_task_status",  "list_tasks",
+        "schedule_reminder",  "list_reminders",      "cancel_reminder",
     };
     return std::find(kKnown.begin(), kKnown.end(), name) != kKnown.end();
 }
@@ -1048,6 +1052,268 @@ json SetIssueStatusTool(ToolContext& ctx, const json& arguments, std::string& ou
         return {};
     }
     return json{{"repo_id", repoId}, {"issue_number", issueNumber}, {"status", status}};
+}
+
+// list_repos — read-only, trivial.
+json ListReposTool(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
+    json out = json::array();
+    for (const Repo& repo : ctx.repoStore.ListAll()) {
+        out.push_back(json{
+            {"id", repo.id},
+            {"github_url", repo.githubUrl},
+            {"status", repo.status},
+            {"agent_id", repo.agentId},
+            {"notes", repo.notes},
+        });
+    }
+    return json{{"repos", out}};
+}
+
+// import_repo — see orchestrator/RepoImport.h's header comment for why this
+// deliberately duplicates just the clone+RepoStore::Create half of
+// Orchestrator::AddRepo rather than calling AddRepo itself: this tool runs
+// in the MCP subprocess, which can't run the full repo-onboarding pipeline
+// (posting the onboarding prompt and running Alex's turn) the way AddRepo
+// does afterward. The repo is left at status "ready" — a human, or an agent
+// asked normally, onboards it from there.
+json ImportRepoTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("github_url")) {
+        outError = "import_repo requires 'github_url'";
+        return {};
+    }
+    const std::string githubUrl = arguments["github_url"].get<std::string>();
+    const std::string notes = arguments.value("notes", std::string());
+
+    const RepoImport::Result result = RepoImport::Import(ctx.repoStore, githubUrl, notes);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", result.repoId}, {"github_url", result.githubUrl}, {"status", "ready"}};
+}
+
+// create_repo — creates a brand-new, empty, private GitHub repo via `gh repo
+// create`, then imports it exactly like import_repo. Same scoping decision:
+// no onboarding chat, status left at "ready".
+json CreateRepoTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("name")) {
+        outError = "create_repo requires 'name'";
+        return {};
+    }
+    const std::string name = arguments["name"].get<std::string>();
+    const std::string notes = arguments.value("notes", std::string());
+
+    const RepoImport::Result result = RepoImport::CreateAndImport(ctx.repoStore, name, notes);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", result.repoId}, {"github_url", result.githubUrl}, {"status", "ready"}};
+}
+
+// create_task
+json CreateTaskTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("title")) {
+        outError = "create_task requires 'title'";
+        return {};
+    }
+    const std::string title = arguments["title"].get<std::string>();
+    const std::string workspaceId = arguments.value("workspace_id", std::string());
+    const std::string assigneeAgentId = arguments.value("assignee_agent_id", std::string());
+    const std::string description = arguments.value("description", std::string());
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    // Same counter-plus-timestamp uniqueness rule as RequestNewTool's chat
+    // ids above — guards against two create_task calls landing in the same
+    // second within one MCP subprocess.
+    static std::atomic<int> taskCounter{0};
+
+    Task task;
+    task.id = "task-" + std::to_string(now) + "-" + std::to_string(++taskCounter);
+    task.workspaceId = workspaceId;
+    // Only defaults chat_id to the current chat when no workspace_id was
+    // given — a workspace-scoped task's natural home is the workspace's own
+    // conversation (looked up by whoever reads the task back), not
+    // necessarily whatever chat this turn happens to be running in.
+    task.chatId = workspaceId.empty() ? ctx.chatId : std::string();
+    task.title = title;
+    task.description = description;
+    task.status = TaskStatus::kNotStarted;
+    task.assigneeAgentId = assigneeAgentId;
+    task.createdBy = ctx.agentId;
+    task.createdAt = now;
+    task.updatedAt = now;
+    if (!ctx.taskStore.Create(task)) {
+        outError = "failed to save the new task";
+        return {};
+    }
+    return json{{"task_id", task.id}, {"status", task.status}};
+}
+
+// update_task_status — assignee_agent_id is optional and reassigns in the
+// same call only when actually passed (an omitted argument leaves the
+// existing assignee untouched, an empty string explicitly unassigns).
+json UpdateTaskStatusTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("task_id") || !arguments.contains("status")) {
+        outError = "update_task_status requires 'task_id' and 'status'";
+        return {};
+    }
+    const std::string taskId = arguments["task_id"].get<std::string>();
+    const std::string status = arguments["status"].get<std::string>();
+    if (!TaskStatus::IsValid(status)) {
+        outError = "status must be one of " + TaskStatus::ValidList() + " (got '" + status + "')";
+        return {};
+    }
+    Task existing;
+    if (!ctx.taskStore.Get(taskId, existing)) {
+        outError = "no task with id '" + taskId + "'";
+        return {};
+    }
+
+    const bool setAssignee = arguments.contains("assignee_agent_id");
+    const std::string assigneeAgentId =
+        setAssignee ? arguments["assignee_agent_id"].get<std::string>() : std::string();
+    if (!ctx.taskStore.UpdateStatus(
+            taskId, status, setAssignee, assigneeAgentId, static_cast<int64_t>(time(nullptr)))) {
+        outError = "failed to update task '" + taskId + "'";
+        return {};
+    }
+    return json{{"task_id", taskId}, {"status", status}};
+}
+
+// list_tasks — every filter is optional; omitting all three searches every
+// task regardless of workspace/chat.
+json ListTasksTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    const std::string status = arguments.value("status", std::string());
+    if (!status.empty() && !TaskStatus::IsValid(status)) {
+        outError = "status must be one of " + TaskStatus::ValidList() + " (got '" + status + "')";
+        return {};
+    }
+    const std::string assigneeAgentId = arguments.value("assignee_agent_id", std::string());
+    const std::string workspaceId = arguments.value("workspace_id", std::string());
+
+    json out = json::array();
+    for (const Task& task : ctx.taskStore.List(status, assigneeAgentId, workspaceId)) {
+        out.push_back(json{
+            {"id", task.id},
+            {"workspace_id", task.workspaceId},
+            {"chat_id", task.chatId},
+            {"title", task.title},
+            {"description", task.description},
+            {"status", task.status},
+            {"assignee_agent_id", task.assigneeAgentId},
+            {"created_by", task.createdBy},
+        });
+    }
+    return json{{"tasks", out}};
+}
+
+// schedule_reminder — chat_id is REQUIRED (unlike post_message/read_chat's
+// optional chat_id, there's no sensible "current chat" default for a
+// reminder meant to fire well after this turn ends) and always goes through
+// the same CallerIsParticipant gate post_message/read_chat apply to an
+// explicit chat_id, per the security fix in commit 337160a: an agent must
+// not be able to schedule a message into a chat it isn't a participant of.
+// Exactly one of delay_seconds/fire_at must be given — accepting both would
+// leave which one wins ambiguous, and accepting neither leaves fire_at
+// undefined.
+json ScheduleReminderTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("chat_id") || !arguments.contains("message")) {
+        outError = "schedule_reminder requires 'chat_id' and 'message'";
+        return {};
+    }
+    const std::string chatId = arguments["chat_id"].get<std::string>();
+    if (!CallerIsParticipant(ctx, chatId)) {
+        outError = "schedule_reminder: you are not a participant of that chat";
+        return {};
+    }
+
+    const bool hasDelay = arguments.contains("delay_seconds");
+    const bool hasFireAt = arguments.contains("fire_at");
+    if (hasDelay == hasFireAt) {
+        outError = "schedule_reminder requires exactly one of 'delay_seconds' or 'fire_at'";
+        return {};
+    }
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    int64_t fireAt = 0;
+    if (hasDelay) {
+        if (!arguments["delay_seconds"].is_number_integer()) {
+            outError = "schedule_reminder: 'delay_seconds' must be an integer";
+            return {};
+        }
+        const int64_t delaySeconds = arguments["delay_seconds"].get<int64_t>();
+        if (delaySeconds < 0) {
+            outError = "schedule_reminder: 'delay_seconds' must not be negative";
+            return {};
+        }
+        fireAt = now + delaySeconds;
+    } else {
+        if (!arguments["fire_at"].is_number_integer()) {
+            outError = "schedule_reminder: 'fire_at' must be an integer unix timestamp";
+            return {};
+        }
+        fireAt = arguments["fire_at"].get<int64_t>();
+    }
+
+    const std::string message = arguments["message"].get<std::string>();
+    static std::atomic<int> reminderCounter{0};
+
+    Reminder reminder;
+    reminder.id = "reminder-" + ctx.agentId + "-" + std::to_string(now) + "-" + std::to_string(++reminderCounter);
+    reminder.chatId = chatId;
+    reminder.message = message;
+    reminder.fireAt = fireAt;
+    reminder.createdBy = ctx.agentId;
+    reminder.status = ReminderStatus::kPending;
+    reminder.createdAt = now;
+    if (!ctx.reminderStore.Create(reminder)) {
+        outError = "failed to save the reminder";
+        return {};
+    }
+    return json{{"reminder_id", reminder.id}, {"fire_at", fireAt}, {"status", reminder.status}};
+}
+
+// list_reminders — always scoped to the caller's own reminders, no args.
+json ListRemindersTool(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
+    json out = json::array();
+    for (const Reminder& reminder : ctx.reminderStore.ListPendingByCreator(ctx.agentId)) {
+        out.push_back(json{
+            {"id", reminder.id},
+            {"chat_id", reminder.chatId},
+            {"message", reminder.message},
+            {"fire_at", reminder.fireAt},
+            {"status", reminder.status},
+        });
+    }
+    return json{{"reminders", out}};
+}
+
+// cancel_reminder — only the agent that created a reminder may cancel it.
+json CancelReminderTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("reminder_id")) {
+        outError = "cancel_reminder requires 'reminder_id'";
+        return {};
+    }
+    const std::string reminderId = arguments["reminder_id"].get<std::string>();
+    Reminder reminder;
+    if (!ctx.reminderStore.Get(reminderId, reminder)) {
+        outError = "no reminder with id '" + reminderId + "'";
+        return {};
+    }
+    if (reminder.createdBy != ctx.agentId) {
+        outError = "cancel_reminder: you can only cancel your own reminders";
+        return {};
+    }
+    if (reminder.status != ReminderStatus::kPending) {
+        outError = "reminder '" + reminderId + "' is not pending (currently '" + reminder.status + "')";
+        return {};
+    }
+    if (!ctx.reminderStore.SetStatus(reminderId, ReminderStatus::kCancelled)) {
+        outError = "failed to cancel reminder '" + reminderId + "'";
+        return {};
+    }
+    return json{{"reminder_id", reminderId}, {"status", ReminderStatus::kCancelled}};
 }
 
 // Available to every agent (see IsAlwaysAllowedTool) — an agent that finds
@@ -1536,6 +1802,147 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "list_repos"},
+            {"description",
+             "List every imported repo (id, github_url, status, agent_id, notes). Read-only."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", json::object()},
+             }},
+        },
+        {
+            {"name", "import_repo"},
+            {"description",
+             "Import an already-existing GitHub repo: clones it and records it as a known repo. Unlike "
+             "/add-repo, this does NOT kick off the repo-onboarding conversation with Alex or propose a "
+             "dedicated agent for it -- the repo is left at status 'ready' for a human, or an agent asked "
+             "normally, to onboard afterward. github_url accepts https://github.com/org/repo, "
+             "git@github.com:org/repo.git, or the bare 'org/repo' form. Idempotent -- importing an "
+             "already-known repo again is a no-op."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"github_url", {{"type", "string"}}},
+                      {"notes", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"github_url"})},
+             }},
+        },
+        {
+            {"name", "create_repo"},
+            {"description",
+             "Create a brand-new, empty, private GitHub repo via the gh CLI (gh repo create --private), "
+             "then import it exactly like import_repo (no onboarding conversation, status left 'ready'). "
+             "name may be 'org/reponame' or just 'reponame' (created under the authenticated gh account)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"name", {{"type", "string"}}},
+                      {"notes", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"name"})},
+             }},
+        },
+        {
+            {"name", "create_task"},
+            {"description",
+             "Create a task. Status starts at 'not_started'. If workspace_id is omitted, the task's chat "
+             "defaults to the current chat; if given, the task is scoped to that workspace instead."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"title", {{"type", "string"}}},
+                      {"workspace_id", {{"type", "string"}}},
+                      {"assignee_agent_id", {{"type", "string"}}},
+                      {"description", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"title"})},
+             }},
+        },
+        {
+            {"name", "update_task_status"},
+            {"description",
+             "Update a task's status, and optionally reassign it in the same call. status must be one of "
+             "'not_started', 'in_progress', 'blocked', 'in_review', 'done', 'cancelled'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"task_id", {{"type", "string"}}},
+                      {"status",
+                       {{"type", "string"},
+                        {"description",
+                         "'not_started', 'in_progress', 'blocked', 'in_review', 'done', or 'cancelled'."}}},
+                      {"assignee_agent_id", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"task_id", "status"})},
+             }},
+        },
+        {
+            {"name", "list_tasks"},
+            {"description",
+             "List tasks, optionally filtered by status, assignee_agent_id, and/or workspace_id. Omitting "
+             "all three searches every task."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"status", {{"type", "string"}}},
+                      {"assignee_agent_id", {{"type", "string"}}},
+                      {"workspace_id", {{"type", "string"}}},
+                  }},
+             }},
+        },
+        {
+            {"name", "schedule_reminder"},
+            {"description",
+             "Schedule a message to be posted into a chat at a future time. Requires chat_id (you must "
+             "already be a participant of it) and message, plus exactly one of delay_seconds (fire this "
+             "many seconds from now) or fire_at (an absolute unix timestamp)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"chat_id", {{"type", "string"}}},
+                      {"message", {{"type", "string"}}},
+                      {"delay_seconds", {{"type", "integer"}}},
+                      {"fire_at", {{"type", "integer"}}},
+                  }},
+                 {"required", json::array({"chat_id", "message"})},
+             }},
+        },
+        {
+            {"name", "list_reminders"},
+            {"description", "List your own still-pending scheduled reminders."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", json::object()},
+             }},
+        },
+        {
+            {"name", "cancel_reminder"},
+            {"description",
+             "Cancel one of your own pending reminders before it fires. Rejected if the reminder belongs "
+             "to another agent or has already fired/been cancelled."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"reminder_id", {{"type", "string"}}}}},
+                 {"required", json::array({"reminder_id"})},
+             }},
+        },
+        {
             {"name", "request_new_tool"},
             {"description",
              "Ask Cardon for a brand-new tool, or for an existing tool's functionality to be extended, "
@@ -1675,6 +2082,24 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = SetIssueStatusTool(ctx, arguments, outError);
     } else if (toolName == "request_new_tool") {
         result = RequestNewTool(ctx, arguments, outError);
+    } else if (toolName == "list_repos") {
+        result = ListReposTool(ctx, arguments, outError);
+    } else if (toolName == "import_repo") {
+        result = ImportRepoTool(ctx, arguments, outError);
+    } else if (toolName == "create_repo") {
+        result = CreateRepoTool(ctx, arguments, outError);
+    } else if (toolName == "create_task") {
+        result = CreateTaskTool(ctx, arguments, outError);
+    } else if (toolName == "update_task_status") {
+        result = UpdateTaskStatusTool(ctx, arguments, outError);
+    } else if (toolName == "list_tasks") {
+        result = ListTasksTool(ctx, arguments, outError);
+    } else if (toolName == "schedule_reminder") {
+        result = ScheduleReminderTool(ctx, arguments, outError);
+    } else if (toolName == "list_reminders") {
+        result = ListRemindersTool(ctx, arguments, outError);
+    } else if (toolName == "cancel_reminder") {
+        result = CancelReminderTool(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }

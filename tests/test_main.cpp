@@ -9,8 +9,10 @@
 #include "../src/db/ChatSummaryStore.h"
 #include "../src/db/Database.h"
 #include "../src/db/PromptTemplateStore.h"
+#include "../src/db/ReminderStore.h"
 #include "../src/db/RepoStore.h"
 #include "../src/db/Schema.h"
+#include "../src/db/TaskStore.h"
 #include "../src/db/TempPermissionStore.h"
 #include "../src/db/WorkspaceStore.h"
 #include "../src/greeting.h"
@@ -430,6 +432,8 @@ void TestMcpServer() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -442,7 +446,7 @@ void TestMcpServer() {
 
     ActivityLog activityLog(L"test-logs", "test-mcp");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
@@ -456,7 +460,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 24, "McpServer: tools/list returns exactly 24 tools");
+    Check(tools.is_array() && tools.size() == 33, "McpServer: tools/list returns exactly 33 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -521,6 +525,8 @@ void TestChatParticipationEnforcement() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat ownChat;
     ownChat.id = "dm-alex";
@@ -550,7 +556,7 @@ void TestChatParticipationEnforcement() {
 
     ActivityLog activityLog(L"test-logs", "test-mcp-participation");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "alex", "dm-alex");
 
     const json readOther = json::parse(server.HandleLine(json{
@@ -600,6 +606,8 @@ void TestApprovalWorkflowTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -612,7 +620,7 @@ void TestApprovalWorkflowTool() {
 
     ActivityLog activityLog(L"test-logs", "test-approval");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string submitCall = json{
@@ -671,6 +679,8 @@ void TestMessageUserTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -683,7 +693,7 @@ void TestMessageUserTool() {
 
     ActivityLog activityLog(L"test-logs", "test-message-user");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string messageUserCall = json{
@@ -728,6 +738,8 @@ void TestUpdateAgentTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Agent target;
     target.id = "target-agent";
@@ -745,7 +757,7 @@ void TestUpdateAgentTool() {
 
     ActivityLog activityLog(L"test-logs", "test-update");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string updateCall = json{
@@ -791,6 +803,8 @@ void TestToolPermissionEnforcement() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -805,7 +819,7 @@ void TestToolPermissionEnforcement() {
 
     ActivityLog activityLog(L"test-logs", "test-permission-denied");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string postCall = json{
@@ -831,7 +845,7 @@ void TestToolPermissionEnforcement() {
     // Unknown agent id (no row at all) must also fail closed, not crash.
     ActivityLog activityLog2(L"test-logs", "test-permission-unknown-agent");
     McpServer serverUnknownAgent(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog2,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog2,
         "nobody", "chat-1");
     const json unknownAgentResponse = json::parse(serverUnknownAgent.HandleLine(postCall));
     Check(
@@ -850,11 +864,13 @@ void TestRememberTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
     SeedTestAgent(agentStore, "alex", {"remember"});
 
     ActivityLog activityLog(L"test-logs", "test-remember");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string rememberCall = json{
@@ -885,6 +901,8 @@ void TestListAgentsTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
     SeedTestAgent(agentStore, "alex", {"list_agents"});
 
     Agent disabled;
@@ -902,7 +920,7 @@ void TestListAgentsTool() {
 
     ActivityLog activityLog(L"test-logs", "test-list-agents");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string listCall = json{
@@ -931,6 +949,8 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
     // Alex holds update_agent, so should see tool_permissions/can_message.
     SeedTestAgent(agentStore, "alex", {"list_agents", "update_agent"});
     // Tyrell doesn't, so should NOT — but still needs list_agents itself to
@@ -947,7 +967,7 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     // As alex (holds update_agent): permissions should be visible.
     {
         McpServer server(
-            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
             "alex", "chat-1");
         const std::string listCall = json{
             {"jsonrpc", "2.0"},
@@ -976,7 +996,7 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     // As tyrell (no update_agent): permissions should be hidden.
     {
         McpServer server(
-            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
             "tyrell", "chat-1");
         const std::string listCall = json{
             {"jsonrpc", "2.0"},
@@ -1010,6 +1030,8 @@ void TestStartChatAndListMyChatsTools() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     // Seed the calling agent (alex) plus two targets, one alex is allowed to
     // message and one it isn't — start_chat's can_message check needs real
@@ -1077,7 +1099,7 @@ void TestStartChatAndListMyChatsTools() {
 
     ActivityLog activityLog(L"test-logs", "test-start-chat");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     // can_message rejection path: charlie isn't in alex's can_message.
@@ -1479,6 +1501,8 @@ void TestWorkspaceCreatorValidation() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     // Empty request is rejected before anything else is touched.
     const WorkspaceCreator::Result emptyResult =
@@ -1535,6 +1559,8 @@ void TestCreateWorkspaceToolValidation() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -1549,7 +1575,7 @@ void TestCreateWorkspaceToolValidation() {
     // No permission granted at all — must fail closed like every other tool.
     SeedTestAgent(agentStore, "tyrell", {"post_message"});
     McpServer serverNoPermission(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "tyrell", "chat-1");
     const std::string createCall = json{
         {"jsonrpc", "2.0"},
@@ -1568,7 +1594,7 @@ void TestCreateWorkspaceToolValidation() {
     SeedTestAgent(agentStore, "tyrell", {"create_workspace"});
     ActivityLog activityLog2(L"test-logs", "test-create-workspace-2");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog2,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog2,
         "tyrell", "chat-1");
 
     const std::string missingArgCall = json{
@@ -1685,6 +1711,8 @@ void TestGitHubPrIssueToolsValidation() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -1709,7 +1737,7 @@ void TestGitHubPrIssueToolsValidation() {
          "set_issue_status"});
     ActivityLog activityLog(L"test-logs", "test-gh-pr-issue-tools");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "tyrell", "chat-1");
 
     int nextId = 1;
@@ -1731,7 +1759,7 @@ void TestGitHubPrIssueToolsValidation() {
         ActivityLog denyLog(L"test-logs", "test-gh-pr-issue-tools-deny");
         McpServer deniedServer(
             chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore,
-            tempPermissionStore, denyLog, "no-permissions-agent", "chat-1");
+            tempPermissionStore, taskStore, reminderStore, denyLog, "no-permissions-agent", "chat-1");
         SeedTestAgent(agentStore, "no-permissions-agent", {});
         const std::string line = json{
             {"jsonrpc", "2.0"},
@@ -1891,12 +1919,14 @@ void TestPromptTemplateMcpTools() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
     promptTemplateStore.SeedDefaultsIfEmpty();
     SeedTestAgent(agentStore, "alex", {"get_prompt_template", "update_prompt_template"});
 
     ActivityLog activityLog(L"test-logs", "test-prompt-templates");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string getCall = json{
@@ -2087,6 +2117,8 @@ void TestRequestAddAgentToChatTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2109,7 +2141,7 @@ void TestRequestAddAgentToChatTool() {
 
     ActivityLog activityLog(L"test-logs", "test-request-add-agent");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
         "alex", "chat-1");
 
     const std::string requestCall = json{
@@ -2167,6 +2199,8 @@ void TestAddAgentToWorkspaceTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "workspace-chat-1";
@@ -2196,7 +2230,7 @@ void TestAddAgentToWorkspaceTool() {
 
     ActivityLog activityLog(L"test-add-agent-to-workspace", "test-add-agent-to-workspace");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "tyrell", "workspace-chat-1");
 
     const std::string call = json{
@@ -2261,6 +2295,8 @@ void TestRequestTemporaryPermissionTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2277,7 +2313,7 @@ void TestRequestTemporaryPermissionTool() {
 
     ActivityLog activityLog(L"test-request-temp-permission", "test-request-temp-permission");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string call = json{
@@ -2350,6 +2386,8 @@ void TestRequestNewToolTool() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2366,7 +2404,7 @@ void TestRequestNewToolTool() {
 
     ActivityLog activityLog(L"test-request-new-tool", "test-request-new-tool");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string call = json{
@@ -2428,6 +2466,8 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
     RepoStore repoStore(db);
     WorkspaceStore workspaceStore(db);
     TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2443,7 +2483,7 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
 
     ActivityLog activityLog(L"test-always-allowed-and-temp-grant", "test-always-allowed-and-temp-grant");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string rememberCall = json{
@@ -2485,6 +2525,403 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
     Check(
         secondDeniedResponse["result"]["isError"] == true,
         "a second read_chat call after the grant is consumed is denied again");
+}
+
+void TestTaskStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    TaskStore store(db);
+
+    Check(TaskStatus::IsValid("not_started"), "TaskStatus: 'not_started' is valid");
+    Check(TaskStatus::IsValid("in_progress"), "TaskStatus: 'in_progress' is valid");
+    Check(TaskStatus::IsValid("blocked"), "TaskStatus: 'blocked' is valid");
+    Check(TaskStatus::IsValid("in_review"), "TaskStatus: 'in_review' is valid");
+    Check(TaskStatus::IsValid("done"), "TaskStatus: 'done' is valid");
+    Check(TaskStatus::IsValid("cancelled"), "TaskStatus: 'cancelled' is valid");
+    Check(!TaskStatus::IsValid("done_done"), "TaskStatus: an unknown status string is invalid");
+    Check(!TaskStatus::IsValid(""), "TaskStatus: an empty status string is invalid");
+
+    Task missing;
+    Check(!store.Get("no-such-task", missing), "TaskStore: Get returns false for an unknown id");
+
+    Task task;
+    task.id = "task-1";
+    task.chatId = "chat-1";
+    task.title = "Fix the parser";
+    task.description = "It chokes on trailing commas";
+    task.status = TaskStatus::kNotStarted;
+    task.createdBy = "alex";
+    task.createdAt = 1;
+    task.updatedAt = 1;
+    Check(store.Create(task), "TaskStore: Create succeeds");
+
+    Task fetched;
+    Check(store.Get("task-1", fetched), "TaskStore: Get finds the created task");
+    Check(
+        fetched.title == task.title && fetched.description == task.description &&
+            fetched.status == TaskStatus::kNotStarted && fetched.workspaceId.empty() &&
+            fetched.assigneeAgentId.empty(),
+        "TaskStore: round-tripped fields match, workspace_id/assignee_agent_id empty by default");
+
+    Check(
+        store.UpdateStatus("task-1", TaskStatus::kInProgress, /*setAssignee=*/true, "dax", 2),
+        "TaskStore: UpdateStatus(setAssignee=true) succeeds");
+    Task afterAssign;
+    store.Get("task-1", afterAssign);
+    Check(
+        afterAssign.status == TaskStatus::kInProgress && afterAssign.assigneeAgentId == "dax" &&
+            afterAssign.updatedAt == 2,
+        "TaskStore: UpdateStatus updates status, assignee, and updated_at together");
+
+    Check(
+        store.UpdateStatus("task-1", TaskStatus::kBlocked, /*setAssignee=*/false, "", 3),
+        "TaskStore: UpdateStatus(setAssignee=false) succeeds");
+    Task afterStatusOnly;
+    store.Get("task-1", afterStatusOnly);
+    Check(
+        afterStatusOnly.status == TaskStatus::kBlocked && afterStatusOnly.assigneeAgentId == "dax",
+        "TaskStore: UpdateStatus with setAssignee=false leaves the existing assignee untouched");
+
+    Task task2;
+    task2.id = "task-2";
+    task2.workspaceId = "workspace-1";
+    task2.title = "Ship the release";
+    task2.status = TaskStatus::kDone;
+    task2.assigneeAgentId = "tyrell";
+    task2.createdBy = "tyrell";
+    task2.createdAt = 4;
+    task2.updatedAt = 4;
+    store.Create(task2);
+
+    Check(store.List("", "", "").size() == 2, "TaskStore: List with no filters returns every task");
+    Check(
+        store.List(TaskStatus::kDone, "", "").size() == 1, "TaskStore: List filters by status");
+    Check(
+        store.List("", "tyrell", "").size() == 1, "TaskStore: List filters by assignee_agent_id");
+    Check(
+        store.List("", "", "workspace-1").size() == 1, "TaskStore: List filters by workspace_id");
+    Check(
+        store.List(TaskStatus::kBlocked, "dax", "").size() == 1,
+        "TaskStore: List filters correctly combine status and assignee");
+}
+
+void TestReminderStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ReminderStore store(db);
+
+    Reminder missing;
+    Check(!store.Get("no-such-reminder", missing), "ReminderStore: Get returns false for an unknown id");
+
+    Reminder reminder;
+    reminder.id = "reminder-1";
+    reminder.chatId = "chat-1";
+    reminder.message = "stand up in 5";
+    reminder.fireAt = 100;
+    reminder.createdBy = "alex";
+    reminder.status = ReminderStatus::kPending;
+    reminder.createdAt = 1;
+    Check(store.Create(reminder), "ReminderStore: Create succeeds");
+
+    Reminder fetched;
+    Check(store.Get("reminder-1", fetched), "ReminderStore: Get finds the created reminder");
+    Check(
+        fetched.message == reminder.message && fetched.fireAt == 100 && fetched.status == ReminderStatus::kPending,
+        "ReminderStore: round-tripped fields match");
+
+    Reminder futureReminder;
+    futureReminder.id = "reminder-2";
+    futureReminder.chatId = "chat-1";
+    futureReminder.message = "still far off";
+    futureReminder.fireAt = 500;
+    futureReminder.createdBy = "alex";
+    futureReminder.status = ReminderStatus::kPending;
+    futureReminder.createdAt = 1;
+    store.Create(futureReminder);
+
+    Reminder otherAgentReminder;
+    otherAgentReminder.id = "reminder-3";
+    otherAgentReminder.chatId = "chat-1";
+    otherAgentReminder.message = "not alex's";
+    otherAgentReminder.fireAt = 50;
+    otherAgentReminder.createdBy = "tyrell";
+    otherAgentReminder.status = ReminderStatus::kPending;
+    otherAgentReminder.createdAt = 1;
+    store.Create(otherAgentReminder);
+
+    const std::vector<Reminder> due = store.ListDue(100);
+    Check(due.size() == 2, "ReminderStore: ListDue returns every pending reminder with fire_at <= now");
+    bool sawReminder1 = false, sawReminder3 = false;
+    for (const Reminder& r : due) {
+        if (r.id == "reminder-1") sawReminder1 = true;
+        if (r.id == "reminder-3") sawReminder3 = true;
+        Check(r.id != "reminder-2", "ReminderStore: ListDue excludes a reminder whose fire_at is still in the future");
+    }
+    Check(sawReminder1 && sawReminder3, "ReminderStore: ListDue includes both due reminders regardless of creator");
+
+    Check(
+        store.ListPendingByCreator("alex").size() == 2,
+        "ReminderStore: ListPendingByCreator scopes to the given creator");
+
+    Check(store.SetStatus("reminder-1", ReminderStatus::kFired), "ReminderStore: SetStatus succeeds");
+    Check(
+        store.ListPendingByCreator("alex").size() == 1,
+        "ReminderStore: a fired reminder no longer shows up in ListPendingByCreator");
+    const std::vector<Reminder> dueAfterFire = store.ListDue(1000);
+    Check(
+        dueAfterFire.size() == 2,
+        "ReminderStore: ListDue still returns the other two still-pending reminders");
+    for (const Reminder& r : dueAfterFire) {
+        Check(r.id != "reminder-1", "ReminderStore: a fired reminder no longer shows up in ListDue");
+    }
+}
+
+void TestTaskToolsRoundTripAndValidation() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    SeedTestAgent(agentStore, "alex", {"create_task", "update_task_status", "list_tasks"});
+
+    ActivityLog activityLog(L"test-task-tools", "test-task-tools");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        taskStore, reminderStore, activityLog, "alex", "chat-1");
+
+    int nextId = 1;
+    auto call = [&](const std::string& name, const json& arguments) -> json {
+        const std::string line = json{
+            {"jsonrpc", "2.0"},
+            {"id", nextId++},
+            {"method", "tools/call"},
+            {"params", {{"name", name}, {"arguments", arguments}}},
+        }.dump();
+        return json::parse(server.HandleLine(line));
+    };
+    auto resultOf = [](const json& response) {
+        return json::parse(response["result"]["content"][0]["text"].get<std::string>());
+    };
+
+    const json createResponse = call("create_task", {{"title", "Write the docs"}});
+    Check(createResponse["result"]["isError"] == false, "create_task with no chat_id/workspace_id succeeds");
+    const json created = resultOf(createResponse);
+    Check(created["status"] == "not_started", "create_task defaults status to not_started");
+    const std::string taskId = created["task_id"].get<std::string>();
+
+    Task stored;
+    Check(taskStore.Get(taskId, stored), "create_task actually wrote a tasks row");
+    Check(
+        stored.chatId == "chat-1" && stored.workspaceId.empty(),
+        "create_task with no workspace_id defaults chat_id to the current chat");
+
+    const json listResponse = call("list_tasks", json::object());
+    Check(listResponse["result"]["isError"] == false, "list_tasks succeeds");
+    const json listed = resultOf(listResponse);
+    Check(
+        listed["tasks"].is_array() && listed["tasks"].size() == 1 && listed["tasks"][0]["id"] == taskId,
+        "create_task -> list_tasks round-trip returns the created task");
+
+    const json badStatusResponse = call("update_task_status", {{"task_id", taskId}, {"status", "not_a_status"}});
+    Check(badStatusResponse["result"]["isError"] == true, "update_task_status rejects an invalid status string");
+
+    const json updateResponse =
+        call("update_task_status", {{"task_id", taskId}, {"status", "in_progress"}, {"assignee_agent_id", "dax"}});
+    Check(updateResponse["result"]["isError"] == false, "update_task_status with a valid status succeeds");
+
+    Task afterUpdate;
+    taskStore.Get(taskId, afterUpdate);
+    Check(
+        afterUpdate.status == "in_progress" && afterUpdate.assigneeAgentId == "dax",
+        "update_task_status actually updated status and assignee together");
+
+    const json filteredList = call("list_tasks", {{"assignee_agent_id", "dax"}});
+    const json filtered = resultOf(filteredList);
+    Check(
+        filtered["tasks"].size() == 1, "list_tasks filters by assignee_agent_id after update_task_status reassigned it");
+
+    const json missingTaskResponse = call("update_task_status", {{"task_id", "no-such-task"}, {"status", "done"}});
+    Check(missingTaskResponse["result"]["isError"] == true, "update_task_status rejects an unknown task_id");
+}
+
+void TestScheduleReminderToolValidation() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+    chatStore.AddParticipant("chat-1", "agent", "alex");
+
+    SeedTestAgent(agentStore, "alex", {"schedule_reminder", "list_reminders", "cancel_reminder"});
+
+    ActivityLog activityLog(L"test-schedule-reminder", "test-schedule-reminder");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        taskStore, reminderStore, activityLog, "alex", "chat-1");
+
+    int nextId = 1;
+    auto call = [&](const std::string& name, const json& arguments) -> json {
+        const std::string line = json{
+            {"jsonrpc", "2.0"},
+            {"id", nextId++},
+            {"method", "tools/call"},
+            {"params", {{"name", name}, {"arguments", arguments}}},
+        }.dump();
+        return json::parse(server.HandleLine(line));
+    };
+    auto resultOf = [](const json& response) {
+        return json::parse(response["result"]["content"][0]["text"].get<std::string>());
+    };
+
+    // Neither delay_seconds nor fire_at given.
+    const json neitherResponse = call("schedule_reminder", {{"chat_id", "chat-1"}, {"message", "hi"}});
+    Check(
+        neitherResponse["result"]["isError"] == true,
+        "schedule_reminder rejects a call with neither delay_seconds nor fire_at");
+
+    // Both given at once — ambiguous, also rejected.
+    const json bothResponse = call(
+        "schedule_reminder",
+        {{"chat_id", "chat-1"}, {"message", "hi"}, {"delay_seconds", 10}, {"fire_at", 200}});
+    Check(bothResponse["result"]["isError"] == true, "schedule_reminder rejects a call with both delay_seconds and fire_at");
+
+    const json delayResponse =
+        call("schedule_reminder", {{"chat_id", "chat-1"}, {"message", "stand up"}, {"delay_seconds", 60}});
+    Check(delayResponse["result"]["isError"] == false, "schedule_reminder succeeds with delay_seconds alone");
+    const json delayResult = resultOf(delayResponse);
+    const std::string reminderId = delayResult["reminder_id"].get<std::string>();
+
+    Reminder stored;
+    Check(reminderStore.Get(reminderId, stored), "schedule_reminder actually wrote a reminders row");
+    Check(stored.status == ReminderStatus::kPending, "a freshly scheduled reminder starts out pending");
+
+    const json fireAtResponse =
+        call("schedule_reminder", {{"chat_id", "chat-1"}, {"message", "later"}, {"fire_at", 9999999999}});
+    Check(fireAtResponse["result"]["isError"] == false, "schedule_reminder succeeds with fire_at alone");
+
+    const json listResponse = call("list_reminders", json::object());
+    const json listed = resultOf(listResponse);
+    Check(listed["reminders"].size() == 2, "list_reminders returns both of the caller's pending reminders");
+
+    const json cancelResponse = call("cancel_reminder", {{"reminder_id", reminderId}});
+    Check(cancelResponse["result"]["isError"] == false, "cancel_reminder succeeds for the caller's own pending reminder");
+
+    Reminder afterCancel;
+    reminderStore.Get(reminderId, afterCancel);
+    Check(afterCancel.status == ReminderStatus::kCancelled, "cancel_reminder actually marks the reminder cancelled");
+
+    const json listAfterCancel = resultOf(call("list_reminders", json::object()));
+    Check(
+        listAfterCancel["reminders"].size() == 1,
+        "a cancelled reminder no longer shows up in list_reminders");
+
+    const json cancelAgainResponse = call("cancel_reminder", {{"reminder_id", reminderId}});
+    Check(
+        cancelAgainResponse["result"]["isError"] == true,
+        "cancel_reminder rejects cancelling an already-cancelled reminder");
+
+    const json cancelMissingResponse = call("cancel_reminder", {{"reminder_id", "no-such-reminder"}});
+    Check(cancelMissingResponse["result"]["isError"] == true, "cancel_reminder rejects an unknown reminder_id");
+}
+
+// Regression coverage mirroring TestChatParticipationEnforcement, for the
+// new schedule_reminder tool: chat_id is REQUIRED (never defaulted, unlike
+// post_message/read_chat), so it must always be checked against
+// chat_participants, not just when explicitly passed.
+void TestScheduleReminderChatParticipationEnforcement() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    Chat ownChat;
+    ownChat.id = "dm-alex";
+    ownChat.createdBy = "user";
+    ownChat.status = "active";
+    ownChat.createdAt = 1;
+    chatStore.CreateChat(ownChat);
+    chatStore.AddParticipant("dm-alex", "agent", "alex");
+
+    Chat otherChat;
+    otherChat.id = "dm-tyrell";
+    otherChat.createdBy = "user";
+    otherChat.status = "active";
+    otherChat.createdAt = 1;
+    chatStore.CreateChat(otherChat);
+    chatStore.AddParticipant("dm-tyrell", "agent", "tyrell");
+
+    SeedTestAgent(agentStore, "alex", {"schedule_reminder"});
+
+    ActivityLog activityLog(L"test-schedule-reminder-participation", "test-schedule-reminder-participation");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        taskStore, reminderStore, activityLog, "alex", "dm-alex");
+
+    const json deniedResponse = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "schedule_reminder"},
+          {"arguments", {{"chat_id", "dm-tyrell"}, {"message", "sneaking in"}, {"delay_seconds", 10}}}}},
+    }.dump()));
+    Check(
+        deniedResponse["result"]["isError"] == true,
+        "schedule_reminder denies an agent with no chat_participants row in the target chat");
+    Check(
+        reminderStore.ListPendingByCreator("alex").empty(),
+        "schedule_reminder did not write a reminder targeting a chat alex isn't part of");
+
+    const json allowedResponse = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "schedule_reminder"},
+          {"arguments", {{"chat_id", "dm-alex"}, {"message", "hi from alex"}, {"delay_seconds", 10}}}}},
+    }.dump()));
+    Check(
+        allowedResponse["result"]["isError"] == false,
+        "schedule_reminder still succeeds for a chat the caller actually participates in");
 }
 
 } // namespace
@@ -2533,6 +2970,11 @@ int main() {
     RUN(TestGitHubPrIssueToolsValidation);
     RUN(TestPromptTemplateStore);
     RUN(TestPromptTemplateMcpTools);
+    RUN(TestTaskStore);
+    RUN(TestReminderStore);
+    RUN(TestTaskToolsRoundTripAndValidation);
+    RUN(TestScheduleReminderToolValidation);
+    RUN(TestScheduleReminderChatParticipationEnforcement);
 #undef RUN
 
     if (failures > 0) {

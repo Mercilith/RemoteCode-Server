@@ -227,6 +227,8 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     workspaceStore_ = std::make_unique<WorkspaceStore>(*db_);
     tempPermissionStore_ = std::make_unique<TempPermissionStore>(*db_);
     promptTemplateStore_ = std::make_unique<PromptTemplateStore>(*db_);
+    taskStore_ = std::make_unique<TaskStore>(*db_);
+    reminderStore_ = std::make_unique<ReminderStore>(*db_);
     agentStore_->SeedAlexIfEmpty();
     promptTemplateStore_->SeedDefaultsIfEmpty();
 
@@ -395,6 +397,24 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         }
     });
 
+    // Periodic reminder firing (~20s poll) — see FireDueReminders' comment
+    // in Orchestrator.h for why this can't happen inside the MCP subprocess
+    // that schedule_reminder itself runs in. Started here (not earlier,
+    // alongside taskStore_/reminderStore_'s construction above) since it
+    // needs a live discordBot_ to post into a chat's channel, same
+    // precondition as discordThread/watchdogThread.
+    std::thread reminderThread([this, &stopping]() {
+        while (!stopping.load()) {
+            for (int i = 0; i < 20 && !stopping.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (stopping.load()) {
+                break;
+            }
+            FireDueReminders();
+        }
+    });
+
     WaitForSingleObject(shutdownEvent, INFINITE);
 
     stopping = true;
@@ -402,6 +422,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
     discordBot_->Stop();
     discordThread.join();
     watchdogThread.join();
+    reminderThread.join();
 
     adminServer_->Stop();
     adminThread.join();
@@ -1705,5 +1726,43 @@ void Orchestrator::SyncPendingWorkspaceAgentGrants() {
             discordBot_->GrantChannelAccess(chat.discordChannelId, agent.discordBotUserId);
         }
         workspaceStore_->ClearPendingAgentGrant(grant.workspaceId, grant.agentId);
+    }
+}
+
+void Orchestrator::FireDueReminders() {
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    for (const Reminder& reminder : reminderStore_->ListDue(now)) {
+        Chat chat;
+        if (!chatStore_->GetChat(reminder.chatId, chat)) {
+            log_(L"Orchestrator: reminder '" + AsciiToWide(reminder.id) + L"' targets unknown chat '" +
+                 AsciiToWide(reminder.chatId) + L"' — dropping rather than retrying forever.");
+            reminderStore_->SetStatus(reminder.id, "fired");
+            continue;
+        }
+
+        Agent agent;
+        if (!agentStore_->Get(reminder.createdBy, agent)) {
+            // Fall back to a minimal stand-in (id-as-name, no own bot) — same
+            // rule PostPendingApprovals uses for a requester that no longer
+            // exists — rather than dropping the reminder's message entirely.
+            agent = Agent{};
+            agent.id = reminder.createdBy;
+            agent.name = reminder.createdBy;
+        }
+
+        Message message;
+        message.chatId = reminder.chatId;
+        message.senderType = "agent";
+        message.senderId = reminder.createdBy;
+        message.type = "text";
+        message.content = reminder.message;
+        message.createdAt = now;
+        chatStore_->InsertMessage(message);
+
+        if (!chat.discordChannelId.empty()) {
+            PostAsAgent(agent, chat.discordChannelId, reminder.message);
+        }
+
+        reminderStore_->SetStatus(reminder.id, "fired");
     }
 }

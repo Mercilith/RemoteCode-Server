@@ -17,7 +17,9 @@
 #include "../db/ChatSummaryStore.h"
 #include "../db/Database.h"
 #include "../db/PromptTemplateStore.h"
+#include "../db/ReminderStore.h"
 #include "../db/RepoStore.h"
+#include "../db/TaskStore.h"
 #include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
 #include "../discord/AgentBotClient.h"
@@ -162,6 +164,20 @@ public:
     void SyncPendingWorkspaceAgentGrants();
 
 private:
+    // Runs on a periodic background thread (~15-30s poll, started alongside
+    // watchdogThread in Run() — see its call site) and, for every reminder
+    // whose fire_at has passed (ReminderStore::ListDue), posts its message
+    // into its chat as the scheduling agent and marks it fired. Same
+    // DB-only/main-process split as EnsurePendingWorkspaceChannels: the
+    // schedule_reminder MCP tool (mcp/Tools.cpp) only ever writes the
+    // `reminders` row from the isolated MCP subprocess, since a reminder
+    // has to fire at an arbitrary future wall-clock time that has nothing to
+    // do with any particular agent turn. Best-effort: a lookup failure (e.g.
+    // the chat or agent no longer exists) is logged and the reminder is
+    // still marked fired rather than retried forever. Skips the Discord post
+    // (but still records the chat message and marks fired) if the chat has
+    // no discord_channel_id yet.
+    void FireDueReminders();
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
     // every active participant agent (the unchanged default for a real
     // incoming user/Discord message), then for each turn mirrors every
@@ -263,6 +279,8 @@ private:
     std::unique_ptr<WorkspaceStore> workspaceStore_;
     std::unique_ptr<TempPermissionStore> tempPermissionStore_;
     std::unique_ptr<PromptTemplateStore> promptTemplateStore_;
+    std::unique_ptr<TaskStore> taskStore_;
+    std::unique_ptr<ReminderStore> reminderStore_;
     std::unique_ptr<DiscordBot> discordBot_;
     std::unique_ptr<AdminServer> adminServer_;
     std::unique_ptr<ActivityLog> activityLog_;

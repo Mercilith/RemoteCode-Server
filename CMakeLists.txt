@@ -82,6 +82,8 @@ add_executable(RemoteCodeServer
     src/db/WorkspaceStore.cpp
     src/db/TempPermissionStore.cpp
     src/db/PromptTemplateStore.cpp
+    src/db/TaskStore.cpp
+    src/db/ReminderStore.cpp
     src/config/ServerConfig.cpp
     src/config/Secrets.cpp
     src/discord/DiscordBot.cpp
@@ -99,6 +101,7 @@ add_executable(RemoteCodeServer
     src/orchestrator/WorkspaceCreator.cpp
     src/orchestrator/WorkspacePr.cpp
     src/orchestrator/GitHubOps.cpp
+    src/orchestrator/RepoImport.cpp
 )
 
 target_include_directories(RemoteCodeServer PRIVATE src "${cpp_httplib_SOURCE_DIR}")

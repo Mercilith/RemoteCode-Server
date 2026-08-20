@@ -6,7 +6,9 @@
 #include "../db/ApprovalStore.h"
 #include "../db/ChatStore.h"
 #include "../db/PromptTemplateStore.h"
+#include "../db/ReminderStore.h"
 #include "../db/RepoStore.h"
+#include "../db/TaskStore.h"
 #include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
 #include "../third_party/json.hpp"
@@ -28,6 +30,14 @@ struct ToolContext {
     // Backs the request_temporary_permission tool — see IsAlwaysAllowedTool
     // and the HasActiveGrant/Consume fallback in Tools::Call.
     TempPermissionStore& tempPermissionStore;
+    // Backs create_task/update_task_status/list_tasks.
+    TaskStore& taskStore;
+    // Backs schedule_reminder/list_reminders/cancel_reminder. Reminder
+    // firing itself happens later, in the main Orchestrator process (see
+    // Orchestrator::FireDueReminders) — this store is only ever used from
+    // here to create/list/cancel a `reminders` row, same DB-only split as
+    // create_workspace/add_agent_to_workspace.
+    ReminderStore& reminderStore;
     ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default

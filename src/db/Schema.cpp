@@ -153,6 +153,31 @@ CREATE TABLE IF NOT EXISTS workspace_agent_grants (
     created_at    INTEGER NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS tasks (
+    id                  TEXT PRIMARY KEY,
+    workspace_id        TEXT,
+    chat_id             TEXT,
+    title               TEXT NOT NULL,
+    description         TEXT,
+    status              TEXT NOT NULL,
+    assignee_agent_id   TEXT,
+    created_by          TEXT NOT NULL,
+    created_at          INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL
+);
+)sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS reminders (
+    id           TEXT PRIMARY KEY,
+    chat_id      TEXT NOT NULL,
+    message      TEXT NOT NULL,
+    fire_at      INTEGER NOT NULL,
+    created_by   TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace
