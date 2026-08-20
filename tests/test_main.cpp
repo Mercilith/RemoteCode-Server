@@ -1104,6 +1104,9 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
         Check(
             tyrellEntry.contains("can_message") && tyrellEntry["can_message"] == json::array({"*"}),
             "list_agents: a caller holding update_agent sees other agents' can_message");
+        Check(
+            tyrellEntry.contains("system_prompt") && tyrellEntry["system_prompt"] == "test",
+            "list_agents: a caller holding update_agent sees other agents' system_prompt");
     }
 
     // As tyrell (no update_agent): permissions should be hidden.
@@ -1129,6 +1132,76 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
         Check(
             !alexEntry.contains("tool_permissions") && !alexEntry.contains("can_message"),
             "list_agents: a caller without update_agent does not see other agents' permissions");
+        Check(
+            !alexEntry.contains("system_prompt"),
+            "list_agents: a caller without update_agent does not see other agents' system_prompt");
+    }
+}
+
+void TestListAgentsToolFiltersByAgentIdAndSections() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+    SeedTestAgent(agentStore, "alex", {"list_agents", "update_agent"});
+    SeedTestAgent(agentStore, "tyrell", {"list_agents", "post_message", "read_chat"});
+
+    ActivityLog activityLog(L"test-logs", "test-list-agents-filters");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        "alex", "chat-1");
+
+    // agent_id narrows to just that one agent.
+    {
+        const std::string call = json{
+            {"jsonrpc", "2.0"},
+            {"id", 1},
+            {"method", "tools/call"},
+            {"params", {{"name", "list_agents"}, {"arguments", {{"agent_id", "tyrell"}}}}},
+        }.dump();
+        const json response = json::parse(server.HandleLine(call));
+        Check(response["result"]["isError"] == false, "list_agents(agent_id) call succeeds");
+        const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        Check(result.is_array() && result.size() == 1 && result[0]["id"] == "tyrell", "list_agents(agent_id) returns only the requested agent");
+    }
+
+    // sections narrows which gated fields come back.
+    {
+        const std::string call = json{
+            {"jsonrpc", "2.0"},
+            {"id", 2},
+            {"method", "tools/call"},
+            {"params",
+             {{"name", "list_agents"},
+              {"arguments", {{"agent_id", "tyrell"}, {"sections", json::array({"system_prompt"})}}}}},
+        }.dump();
+        const json response = json::parse(server.HandleLine(call));
+        Check(response["result"]["isError"] == false, "list_agents(sections) call succeeds");
+        const json result = json::parse(response["result"]["content"][0]["text"].get<std::string>());
+        Check(
+            result.size() == 1 && result[0].contains("system_prompt") && !result[0].contains("tool_permissions") &&
+                !result[0].contains("can_message"),
+            "list_agents(sections) includes only the requested gated field");
+    }
+
+    // an unknown section is rejected.
+    {
+        const std::string call = json{
+            {"jsonrpc", "2.0"},
+            {"id", 3},
+            {"method", "tools/call"},
+            {"params", {{"name", "list_agents"}, {"arguments", {{"sections", json::array({"bogus"})}}}}},
+        }.dump();
+        const json response = json::parse(server.HandleLine(call));
+        Check(response["result"]["isError"] == true, "list_agents rejects an unknown section name");
     }
 }
 
@@ -3084,6 +3157,7 @@ int main() {
     RUN(TestRememberTool);
     RUN(TestListAgentsTool);
     RUN(TestListAgentsToolExposesPermissionsToUpdateAgentHolder);
+    RUN(TestListAgentsToolFiltersByAgentIdAndSections);
     RUN(TestStartChatAndListMyChatsTools);
     RUN(TestRequestAddAgentToChatTool);
     RUN(TestAddAgentToWorkspaceTool);

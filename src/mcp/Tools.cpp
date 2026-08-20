@@ -314,16 +314,19 @@ json Remember(ToolContext& ctx, const json& arguments, std::string& outError) {
     return json{{"status", "remembered"}};
 }
 
-json ListAgents(ToolContext& ctx, const json& /*arguments*/, std::string& /*outError*/) {
-    // tool_permissions/can_message are only useful to a caller that could
-    // actually act on them — i.e. one that itself holds update_agent (the
-    // only tool that can change another agent's permissions). Everyone else
-    // gets the same id/name/description this always returned. Without this,
-    // an agent asked to grant another agent a permission has no way to see
-    // what that agent already has, and update_agent replaces the whole
-    // array rather than merging — a real gap that showed up live: Alex
-    // correctly refused to guess rather than risk wiping out an agent's
-    // existing permissions when asked to grant a new one.
+json ListAgents(ToolContext& ctx, const json& arguments, std::string& outError) {
+    // tool_permissions/can_message/system_prompt are only useful to a
+    // caller that could actually act on them — i.e. one that itself holds
+    // update_agent (the only tool that can change another agent's
+    // permissions or prompt). Everyone else gets the same id/name/
+    // description this always returned. Without this, an agent asked to
+    // grant another agent a permission has no way to see what that agent
+    // already has, and update_agent replaces the whole array/field rather
+    // than merging — a real gap that showed up live: Alex correctly refused
+    // to guess rather than risk wiping out an agent's existing permissions
+    // when asked to grant a new one. system_prompt has the exact same
+    // problem for prompt edits — Alex had update_agent but nothing that let
+    // her see what she'd actually be overwriting.
     Agent caller;
     bool showPermissions = false;
     if (ctx.agentStore.Get(ctx.agentId, caller)) {
@@ -335,10 +338,59 @@ json ListAgents(ToolContext& ctx, const json& /*arguments*/, std::string& /*outE
         }
     }
 
+    // Optional 'agent_id' narrows the result to a single agent (still an
+    // array, for a stable response shape) instead of every active agent —
+    // useful when a caller already knows who it's asking about and doesn't
+    // want to scan the whole roster. Optional 'sections' narrows which of
+    // the gated fields come back (only meaningful when showPermissions is
+    // true; a caller without update_agent never sees these regardless of
+    // what it asks for) — e.g. a caller revising just tool_permissions
+    // doesn't need system_prompt's full text in the response.
+    std::string filterAgentId;
+    if (arguments.contains("agent_id")) {
+        if (!arguments["agent_id"].is_string()) {
+            outError = "list_agents: 'agent_id' must be a string";
+            return {};
+        }
+        filterAgentId = arguments["agent_id"].get<std::string>();
+    }
+    bool wantToolPermissions = true;
+    bool wantCanMessage = true;
+    bool wantSystemPrompt = true;
+    if (arguments.contains("sections")) {
+        if (!arguments["sections"].is_array()) {
+            outError = "list_agents: 'sections' must be an array of strings";
+            return {};
+        }
+        wantToolPermissions = false;
+        wantCanMessage = false;
+        wantSystemPrompt = false;
+        for (const json& section : arguments["sections"]) {
+            if (!section.is_string()) {
+                outError = "list_agents: 'sections' entries must be strings";
+                return {};
+            }
+            const std::string s = section.get<std::string>();
+            if (s == "tool_permissions") {
+                wantToolPermissions = true;
+            } else if (s == "can_message") {
+                wantCanMessage = true;
+            } else if (s == "system_prompt") {
+                wantSystemPrompt = true;
+            } else {
+                outError = "list_agents: unknown section '" + s + "'";
+                return {};
+            }
+        }
+    }
+
     const std::vector<Agent> agents = ctx.agentStore.ListAll();
     json out = json::array();
     for (const Agent& agent : agents) {
         if (agent.status != "active") {
+            continue;
+        }
+        if (!filterAgentId.empty() && agent.id != filterAgentId) {
             continue;
         }
         json entry{
@@ -347,15 +399,22 @@ json ListAgents(ToolContext& ctx, const json& /*arguments*/, std::string& /*outE
             {"description", agent.description},
         };
         if (showPermissions) {
-            try {
-                entry["tool_permissions"] = json::parse(agent.toolPermissionsJson);
-            } catch (const json::parse_error&) {
-                entry["tool_permissions"] = json::array();
+            if (wantToolPermissions) {
+                try {
+                    entry["tool_permissions"] = json::parse(agent.toolPermissionsJson);
+                } catch (const json::parse_error&) {
+                    entry["tool_permissions"] = json::array();
+                }
             }
-            try {
-                entry["can_message"] = json::parse(agent.canMessageJson);
-            } catch (const json::parse_error&) {
-                entry["can_message"] = json::array();
+            if (wantCanMessage) {
+                try {
+                    entry["can_message"] = json::parse(agent.canMessageJson);
+                } catch (const json::parse_error&) {
+                    entry["can_message"] = json::array();
+                }
+            }
+            if (wantSystemPrompt) {
+                entry["system_prompt"] = agent.systemPrompt;
             }
         }
         out.push_back(entry);
@@ -1530,13 +1589,33 @@ json Tools::Definitions() {
              "List every currently active agent (id, name, one-line description). Use this to check "
              "what already exists before proposing a new agent, so you don't create something that "
              "duplicates or overlaps an existing one. If you yourself hold update_agent, each entry "
-             "also includes that agent's current tool_permissions and can_message — check this before "
-             "calling update_agent to change another agent's permissions, since update_agent replaces "
-             "the whole array rather than merging into it."},
+             "also includes that agent's current tool_permissions, can_message, and system_prompt — "
+             "check this before calling update_agent to change another agent, since update_agent "
+             "replaces tool_permissions/can_message wholesale rather than merging into them, and "
+             "replaces system_prompt outright with whatever you pass, so you need to see the current "
+             "prompt first if you're revising it rather than replacing it entirely. Optionally pass "
+             "'agent_id' to look up just one agent instead of the whole roster, and/or 'sections' "
+             "(an array of 'tool_permissions', 'can_message', 'system_prompt') to limit which of "
+             "those gated fields come back — e.g. request just 'system_prompt' when all you need is "
+             "the current prompt text. Both only narrow the response; you still need update_agent to "
+             "see any of the gated fields at all."},
             {"inputSchema",
              {
                  {"type", "object"},
-                 {"properties", json::object()},
+                 {"properties",
+                  {
+                      {"agent_id",
+                       {{"type", "string"},
+                        {"description", "Only return this agent, instead of every active agent."}}},
+                      {"sections",
+                       {{"type", "array"},
+                        {"items",
+                         {{"type", "string"},
+                          {"enum", json::array({"tool_permissions", "can_message", "system_prompt"})}}},
+                        {"description",
+                         "Limit which gated fields are included (only visible at all if you hold "
+                         "update_agent). Omit to get all of them."}}},
+                  }},
              }},
         },
         {
