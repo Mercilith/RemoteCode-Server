@@ -17,6 +17,7 @@ add_executable(RemoteCodeServerTests
     ${CMAKE_SOURCE_DIR}/src/mcp/Tools.cpp
     ${CMAKE_SOURCE_DIR}/src/orchestrator/WorkspaceCreator.cpp
     ${CMAKE_SOURCE_DIR}/src/orchestrator/WorkspacePr.cpp
+    ${CMAKE_SOURCE_DIR}/src/orchestrator/GitHubOps.cpp
     ${CMAKE_SOURCE_DIR}/src/util/Text.cpp
     ${CMAKE_SOURCE_DIR}/src/util/ActivityLog.cpp
     ${CMAKE_SOURCE_DIR}/src/util/Mentions.cpp

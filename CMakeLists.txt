@@ -98,6 +98,7 @@ add_executable(RemoteCodeServer
     src/orchestrator/Orchestrator.cpp
     src/orchestrator/WorkspaceCreator.cpp
     src/orchestrator/WorkspacePr.cpp
+    src/orchestrator/GitHubOps.cpp
 )
 
 target_include_directories(RemoteCodeServer PRIVATE src "${cpp_httplib_SOURCE_DIR}")

@@ -18,6 +18,7 @@
 #include "../src/orchestrator/WorkspaceCreator.h"
 #include "../src/third_party/json.hpp"
 #include "../src/util/ActivityLog.h"
+#include "../src/orchestrator/GitHubOps.h"
 #include "../src/util/GitHubRepo.h"
 #include "../src/util/Mentions.h"
 #include "../src/util/Text.h"
@@ -455,7 +456,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 17, "McpServer: tools/list returns exactly 17 tools");
+    Check(tools.is_array() && tools.size() == 24, "McpServer: tools/list returns exactly 24 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -1606,6 +1607,235 @@ void TestCreateWorkspaceToolValidation() {
     Check(workspaceStore.ListAll().empty(), "create_workspace: no failed call left behind a workspace row");
 }
 
+void TestGitHubOpsValidation() {
+    std::string state, method, err;
+
+    Check(
+        GitHubOps::ResolveListState("", true, state, err) && state == "open",
+        "GitHubOps::ResolveListState: empty filter defaults to 'open'");
+    Check(
+        GitHubOps::ResolveListState("merged", true, state, err) && state == "merged",
+        "GitHubOps::ResolveListState: PR listing accepts 'merged'");
+    err.clear();
+    Check(
+        !GitHubOps::ResolveListState("merged", false, state, err) && !err.empty(),
+        "GitHubOps::ResolveListState: issue listing rejects 'merged' (no such issue state)");
+    err.clear();
+    Check(
+        !GitHubOps::ResolveListState("bogus", true, state, err) && !err.empty(),
+        "GitHubOps::ResolveListState: an unrecognized filter is rejected with a message");
+
+    err.clear();
+    Check(GitHubOps::ValidateSetPrStatus("open", err), "GitHubOps::ValidateSetPrStatus: accepts 'open'");
+    Check(GitHubOps::ValidateSetPrStatus("closed", err), "GitHubOps::ValidateSetPrStatus: accepts 'closed'");
+    Check(GitHubOps::ValidateSetPrStatus("approved", err), "GitHubOps::ValidateSetPrStatus: accepts 'approved'");
+    Check(
+        GitHubOps::ValidateSetPrStatus("changes-requested", err),
+        "GitHubOps::ValidateSetPrStatus: accepts 'changes-requested'");
+    err.clear();
+    Check(
+        !GitHubOps::ValidateSetPrStatus("merged", err),
+        "GitHubOps::ValidateSetPrStatus: explicitly rejects 'merged'");
+    Check(
+        err.find("merge_pull_request") != std::string::npos,
+        "GitHubOps::ValidateSetPrStatus: the 'merged' rejection message points at merge_pull_request");
+    err.clear();
+    Check(
+        !GitHubOps::ValidateSetPrStatus("bogus", err) && !err.empty(),
+        "GitHubOps::ValidateSetPrStatus: rejects an unrecognized status");
+
+    err.clear();
+    Check(GitHubOps::ValidateSetIssueStatus("open", err), "GitHubOps::ValidateSetIssueStatus: accepts 'open'");
+    Check(GitHubOps::ValidateSetIssueStatus("closed", err), "GitHubOps::ValidateSetIssueStatus: accepts 'closed'");
+    err.clear();
+    Check(
+        !GitHubOps::ValidateSetIssueStatus("merged", err) && !err.empty(),
+        "GitHubOps::ValidateSetIssueStatus: rejects a PR-only status like 'merged'");
+
+    err.clear();
+    Check(
+        GitHubOps::ValidateMergeMethod("", method, err) && method == "merge",
+        "GitHubOps::ValidateMergeMethod: empty method defaults to 'merge'");
+    Check(
+        GitHubOps::ValidateMergeMethod("squash", method, err) && method == "squash",
+        "GitHubOps::ValidateMergeMethod: accepts 'squash'");
+    Check(
+        GitHubOps::ValidateMergeMethod("rebase", method, err) && method == "rebase",
+        "GitHubOps::ValidateMergeMethod: accepts 'rebase'");
+    err.clear();
+    Check(
+        !GitHubOps::ValidateMergeMethod("bogus", method, err) && !err.empty(),
+        "GitHubOps::ValidateMergeMethod: rejects an unrecognized method");
+}
+
+// Covers the 7 gh-backed PR/issue tools' own argument validation and
+// repo_id resolution failure -- the two things testable here without a real
+// `gh`/network call (see this task's brief). Every case below either fails
+// validation before a repo lookup happens, or resolves to an unknown repo_id
+// and stops there, so none of these ever reach GitHubOps' actual `gh.exe`
+// subprocess calls.
+void TestGitHubPrIssueToolsValidation() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    Repo repo;
+    repo.id = "acme__widgets";
+    repo.githubUrl = "https://github.com/acme/widgets";
+    repo.localPath = "C:\\ProgramData\\RemoteCode\\Repos\\acme__widgets";
+    repo.status = "ready";
+    repo.createdAt = 1;
+    repo.updatedAt = 1;
+    Check(repoStore.Create(repo), "TestGitHubPrIssueToolsValidation: fixture repo created");
+
+    SeedTestAgent(
+        agentStore, "tyrell",
+        {"list_pull_requests", "get_pr_status", "set_pr_status", "merge_pull_request", "list_issues", "create_issue",
+         "set_issue_status"});
+    ActivityLog activityLog(L"test-logs", "test-gh-pr-issue-tools");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        activityLog, "tyrell", "chat-1");
+
+    int nextId = 1;
+    auto call = [&](const std::string& name, const json& arguments) -> json {
+        const std::string line = json{
+            {"jsonrpc", "2.0"},
+            {"id", nextId++},
+            {"method", "tools/call"},
+            {"params", {{"name", name}, {"arguments", arguments}}},
+        }.dump();
+        return json::parse(server.HandleLine(line));
+    };
+    auto errorText = [](const json& response) -> std::string {
+        return response["result"]["content"][0]["text"].get<std::string>();
+    };
+
+    // Permission enforcement fails closed like every other tool.
+    {
+        ActivityLog denyLog(L"test-logs", "test-gh-pr-issue-tools-deny");
+        McpServer deniedServer(
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore,
+            tempPermissionStore, denyLog, "no-permissions-agent", "chat-1");
+        SeedTestAgent(agentStore, "no-permissions-agent", {});
+        const std::string line = json{
+            {"jsonrpc", "2.0"},
+            {"id", 0},
+            {"method", "tools/call"},
+            {"params", {{"name", "list_pull_requests"}, {"arguments", {{"repo_id", "acme__widgets"}}}}},
+        }.dump();
+        const json response = json::parse(deniedServer.HandleLine(line));
+        Check(
+            response["result"]["isError"] == true,
+            "list_pull_requests: fails closed for an agent without the tool's permission");
+    }
+
+    // Missing required args.
+    Check(
+        call("list_pull_requests", json::object())["result"]["isError"] == true,
+        "list_pull_requests: rejects a call with no repo_id");
+    Check(
+        call("get_pr_status", {{"repo_id", "acme__widgets"}})["result"]["isError"] == true,
+        "get_pr_status: rejects a call with no pr_number");
+    Check(
+        call("set_pr_status", {{"repo_id", "acme__widgets"}, {"pr_number", 1}})["result"]["isError"] == true,
+        "set_pr_status: rejects a call with no status");
+    Check(
+        call("merge_pull_request", json::object())["result"]["isError"] == true,
+        "merge_pull_request: rejects a call with no repo_id/pr_number");
+    Check(
+        call("list_issues", json::object())["result"]["isError"] == true,
+        "list_issues: rejects a call with no repo_id");
+    Check(
+        call("create_issue", {{"repo_id", "acme__widgets"}})["result"]["isError"] == true,
+        "create_issue: rejects a call with no title");
+    Check(
+        call("set_issue_status", {{"repo_id", "acme__widgets"}, {"issue_number", 1}})["result"]["isError"] == true,
+        "set_issue_status: rejects a call with no status");
+
+    // pr_number/issue_number must actually be integers, not e.g. a numeric string.
+    const json badPrNumber =
+        call("get_pr_status", {{"repo_id", "acme__widgets"}, {"pr_number", "7"}});
+    Check(badPrNumber["result"]["isError"] == true, "get_pr_status: rejects a non-integer pr_number");
+
+    // set_pr_status explicitly rejects "merged" -- this is a hard design
+    // requirement (merging must go through merge_pull_request instead), not
+    // just a would-be-nice validation, so it gets its own dedicated case.
+    const json mergedRejected =
+        call("set_pr_status", {{"repo_id", "acme__widgets"}, {"pr_number", 1}, {"status", "merged"}});
+    Check(mergedRejected["result"]["isError"] == true, "set_pr_status: rejects status 'merged'");
+    Check(
+        errorText(mergedRejected).find("merge_pull_request") != std::string::npos,
+        "set_pr_status: the 'merged' rejection error tells the caller to use merge_pull_request");
+
+    // Invalid status/filter/method values.
+    Check(
+        call("list_pull_requests", {{"repo_id", "acme__widgets"}, {"status", "bogus"}})["result"]["isError"] == true,
+        "list_pull_requests: rejects an invalid status filter");
+    Check(
+        call("list_issues", {{"repo_id", "acme__widgets"}, {"status", "merged"}})["result"]["isError"] == true,
+        "list_issues: rejects 'merged' as a status filter (issues have no merged state)");
+    Check(
+        call("set_pr_status", {{"repo_id", "acme__widgets"}, {"pr_number", 1}, {"status", "bogus"}})
+                ["result"]["isError"] == true,
+        "set_pr_status: rejects an unrecognized status");
+    Check(
+        call("merge_pull_request", {{"repo_id", "acme__widgets"}, {"pr_number", 1}, {"merge_method", "bogus"}})
+                ["result"]["isError"] == true,
+        "merge_pull_request: rejects an unrecognized merge_method");
+    Check(
+        call("set_issue_status", {{"repo_id", "acme__widgets"}, {"issue_number", 1}, {"status", "bogus"}})
+                ["result"]["isError"] == true,
+        "set_issue_status: rejects an unrecognized status");
+
+    // Unknown repo_id resolves to a clear error rather than shelling out to
+    // gh with garbage -- every tool below is well-formed and validation-
+    // clean, so the only remaining failure point is ResolveOwnerRepo.
+    const json unknownRepoList = call("list_pull_requests", {{"repo_id", "no-such-repo"}});
+    Check(unknownRepoList["result"]["isError"] == true, "list_pull_requests: unknown repo_id is an error");
+    Check(
+        errorText(unknownRepoList).find("unknown repo") != std::string::npos,
+        "list_pull_requests: the unknown-repo error names the actual problem");
+
+    Check(
+        call("get_pr_status", {{"repo_id", "no-such-repo"}, {"pr_number", 1}})["result"]["isError"] == true,
+        "get_pr_status: unknown repo_id is an error");
+    Check(
+        call(
+            "set_pr_status", {{"repo_id", "no-such-repo"}, {"pr_number", 1}, {"status", "open"}})["result"]["isError"] ==
+            true,
+        "set_pr_status: unknown repo_id is an error");
+    Check(
+        call("merge_pull_request", {{"repo_id", "no-such-repo"}, {"pr_number", 1}})["result"]["isError"] == true,
+        "merge_pull_request: unknown repo_id is an error");
+    Check(
+        call("list_issues", {{"repo_id", "no-such-repo"}})["result"]["isError"] == true,
+        "list_issues: unknown repo_id is an error");
+    Check(
+        call("create_issue", {{"repo_id", "no-such-repo"}, {"title", "x"}})["result"]["isError"] == true,
+        "create_issue: unknown repo_id is an error");
+    Check(
+        call(
+            "set_issue_status",
+            {{"repo_id", "no-such-repo"}, {"issue_number", 1}, {"status", "open"}})["result"]["isError"] == true,
+        "set_issue_status: unknown repo_id is an error");
+}
+
 void TestPromptTemplateStore() {
     Database db;
     db.Open(L":memory:");
@@ -2299,6 +2529,8 @@ int main() {
     RUN(TestTempPermissionStore);
     RUN(TestWorkspaceCreatorValidation);
     RUN(TestCreateWorkspaceToolValidation);
+    RUN(TestGitHubOpsValidation);
+    RUN(TestGitHubPrIssueToolsValidation);
     RUN(TestPromptTemplateStore);
     RUN(TestPromptTemplateMcpTools);
 #undef RUN

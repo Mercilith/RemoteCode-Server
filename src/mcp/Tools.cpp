@@ -7,6 +7,8 @@
 
 #include "../orchestrator/WorkspaceCreator.h"
 #include "../orchestrator/WorkspacePr.h"
+#include "../orchestrator/GitHubOps.h"
+#include "../util/GitHubRepo.h"
 #include "../util/Mentions.h"
 #include "../util/Text.h"
 
@@ -668,6 +670,8 @@ bool IsKnownToolName(const std::string& name) {
         "update_agent",     "remember",          "list_agents",         "list_my_chats",
         "start_chat",       "request_add_agent_to_chat", "get_prompt_template", "update_prompt_template",
         "create_workspace", "add_agent_to_workspace",    "create_pull_request",
+        "list_pull_requests", "get_pr_status",     "set_pr_status",       "merge_pull_request",
+        "list_issues",       "create_issue",       "set_issue_status",
     };
     return std::find(kKnown.begin(), kKnown.end(), name) != kKnown.end();
 }
@@ -792,6 +796,258 @@ json CreatePullRequestTool(ToolContext& ctx, const json& arguments, std::string&
         return {};
     }
     return json{{"pr_url", result.prUrl}, {"workspace_id", workspaceId}, {"repo_id", repoId}};
+}
+
+// Resolves a repo_id (RepoStore's id, e.g. "someorg__somerepo") to the
+// "org/repo" form gh's --repo flag wants, via Repo::githubUrl +
+// GitHubRepo::ParseGitHubUrl (the same helper Orchestrator::AddRepo uses to
+// validate a repo's URL on the way in — githubUrl is trusted to already
+// parse cleanly by the time a repo row exists). Shared by every gh-backed
+// PR/issue tool below, none of which need a local worktree the way
+// create_pull_request does (see GitHubOps.h's module comment).
+bool ResolveOwnerRepo(ToolContext& ctx, const std::string& repoId, std::string& outOwnerRepo, std::string& outError) {
+    Repo repo;
+    if (!ctx.repoStore.Get(repoId, repo)) {
+        outError = "unknown repo '" + repoId + "'";
+        return false;
+    }
+    std::string org, name;
+    if (!GitHubRepo::ParseGitHubUrl(repo.githubUrl, org, name)) {
+        outError = "repo '" + repoId + "' has an unparseable github_url ('" + repo.githubUrl + "')";
+        return false;
+    }
+    outOwnerRepo = org + "/" + name;
+    return true;
+}
+
+// list_pull_requests — `status` defaults to "open"; gh's own PR-list field
+// name for the branch (headRefName) is remapped to `branch` in the tool's
+// output to match the plainer name the spec/agents expect.
+json ListPullRequestsTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id")) {
+        outError = "list_pull_requests requires 'repo_id'";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const std::string statusArg = arguments.value("status", std::string());
+
+    std::string state;
+    if (!GitHubOps::ResolveListState(statusArg, /*forPr=*/true, state, outError)) {
+        return {};
+    }
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::ListPullRequests(ownerRepo, state);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    json pullRequests = json::array();
+    for (const json& pr : result.data) {
+        pullRequests.push_back(json{
+            {"number", pr.value("number", 0)},
+            {"title", pr.value("title", "")},
+            {"url", pr.value("url", "")},
+            {"state", pr.value("state", "")},
+            {"branch", pr.value("headRefName", "")},
+        });
+    }
+    return json{{"repo_id", repoId}, {"pull_requests", pullRequests}};
+}
+
+// get_pr_status
+json GetPrStatusTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id") || !arguments.contains("pr_number")) {
+        outError = "get_pr_status requires 'repo_id' and 'pr_number'";
+        return {};
+    }
+    if (!arguments["pr_number"].is_number_integer()) {
+        outError = "get_pr_status: 'pr_number' must be an integer";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const int prNumber = arguments["pr_number"].get<int>();
+
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::GetPrStatus(ownerRepo, prNumber);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{
+        {"repo_id", repoId},
+        {"pr_number", result.data.value("number", prNumber)},
+        {"title", result.data.value("title", "")},
+        {"url", result.data.value("url", "")},
+        {"state", result.data.value("state", "")},
+        {"mergeable", result.data.value("mergeable", "")},
+        {"review_decision", result.data.value("reviewDecision", "")},
+    };
+}
+
+// set_pr_status — deliberately does not accept "merged" (see
+// GitHubOps::ValidateSetPrStatus's error message): merging is a materially
+// bigger action than any of the four states this tool actually covers, so it
+// gets its own explicit tool (merge_pull_request) an agent has to be
+// separately permissioned for, rather than being reachable as just another
+// status string here. `comment` is optional and doubles as the review body
+// for 'approved'/'changes-requested' — gh's --request-changes requires a
+// non-empty body, so GitHubOps::SetPrStatus substitutes a placeholder when
+// the caller (agent) didn't provide one rather than failing the call outright.
+json SetPrStatusTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id") || !arguments.contains("pr_number") || !arguments.contains("status")) {
+        outError = "set_pr_status requires 'repo_id', 'pr_number', and 'status'";
+        return {};
+    }
+    if (!arguments["pr_number"].is_number_integer()) {
+        outError = "set_pr_status: 'pr_number' must be an integer";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const int prNumber = arguments["pr_number"].get<int>();
+    const std::string status = arguments["status"].get<std::string>();
+    const std::string comment = arguments.value("comment", std::string());
+
+    if (!GitHubOps::ValidateSetPrStatus(status, outError)) {
+        return {};
+    }
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::SetPrStatus(ownerRepo, prNumber, status, comment);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", repoId}, {"pr_number", prNumber}, {"status", status}};
+}
+
+// merge_pull_request
+json MergePullRequestTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id") || !arguments.contains("pr_number")) {
+        outError = "merge_pull_request requires 'repo_id' and 'pr_number'";
+        return {};
+    }
+    if (!arguments["pr_number"].is_number_integer()) {
+        outError = "merge_pull_request: 'pr_number' must be an integer";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const int prNumber = arguments["pr_number"].get<int>();
+    const std::string methodArg = arguments.value("merge_method", std::string());
+
+    std::string mergeMethod;
+    if (!GitHubOps::ValidateMergeMethod(methodArg, mergeMethod, outError)) {
+        return {};
+    }
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::MergePullRequest(ownerRepo, prNumber, mergeMethod);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", repoId}, {"pr_number", prNumber}, {"merge_method", mergeMethod}, {"result", result.text}};
+}
+
+// list_issues
+json ListIssuesTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id")) {
+        outError = "list_issues requires 'repo_id'";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const std::string statusArg = arguments.value("status", std::string());
+
+    std::string state;
+    if (!GitHubOps::ResolveListState(statusArg, /*forPr=*/false, state, outError)) {
+        return {};
+    }
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::ListIssues(ownerRepo, state);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    json issues = json::array();
+    for (const json& issue : result.data) {
+        issues.push_back(json{
+            {"number", issue.value("number", 0)},
+            {"title", issue.value("title", "")},
+            {"url", issue.value("url", "")},
+            {"state", issue.value("state", "")},
+        });
+    }
+    return json{{"repo_id", repoId}, {"issues", issues}};
+}
+
+// create_issue
+json CreateIssueTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id") || !arguments.contains("title")) {
+        outError = "create_issue requires 'repo_id' and 'title'";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const std::string title = arguments["title"].get<std::string>();
+    const std::string body = arguments.value("body", std::string());
+
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::CreateIssue(ownerRepo, title, body);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", repoId}, {"issue_url", result.text}};
+}
+
+// set_issue_status
+json SetIssueStatusTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("repo_id") || !arguments.contains("issue_number") || !arguments.contains("status")) {
+        outError = "set_issue_status requires 'repo_id', 'issue_number', and 'status'";
+        return {};
+    }
+    if (!arguments["issue_number"].is_number_integer()) {
+        outError = "set_issue_status: 'issue_number' must be an integer";
+        return {};
+    }
+    const std::string repoId = arguments["repo_id"].get<std::string>();
+    const int issueNumber = arguments["issue_number"].get<int>();
+    const std::string status = arguments["status"].get<std::string>();
+
+    if (!GitHubOps::ValidateSetIssueStatus(status, outError)) {
+        return {};
+    }
+    std::string ownerRepo;
+    if (!ResolveOwnerRepo(ctx, repoId, ownerRepo, outError)) {
+        return {};
+    }
+
+    const GitHubOps::Result result = GitHubOps::SetIssueStatus(ownerRepo, issueNumber, status);
+    if (!result.ok) {
+        outError = result.error;
+        return {};
+    }
+    return json{{"repo_id", repoId}, {"issue_number", issueNumber}, {"status", status}};
 }
 
 // Available to every agent (see IsAlwaysAllowedTool) — an agent that finds
@@ -1160,6 +1416,126 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "list_pull_requests"},
+            {"description",
+             "List a repo's pull requests via the gh CLI (no local worktree needed -- targets "
+             "owner/repo directly). status filters by state: 'open' (default), 'closed', 'merged', "
+             "or 'all'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"status", {{"type", "string"}, {"description", "'open' (default), 'closed', 'merged', or 'all'."}}},
+                  }},
+                 {"required", json::array({"repo_id"})},
+             }},
+        },
+        {
+            {"name", "get_pr_status"},
+            {"description",
+             "Get one pull request's current state, title, url, mergeable status, and review decision "
+             "via the gh CLI."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"pr_number", {{"type", "integer"}}},
+                  }},
+                 {"required", json::array({"repo_id", "pr_number"})},
+             }},
+        },
+        {
+            {"name", "set_pr_status"},
+            {"description",
+             "Reopen, close, approve, or request changes on a pull request via the gh CLI. status must "
+             "be one of 'open', 'closed', 'approved', 'changes-requested' -- this tool deliberately does "
+             "not accept 'merged'; use merge_pull_request to actually merge a PR. comment is optional "
+             "free-form text used as the review body for 'approved'/'changes-requested' (a placeholder "
+             "is substituted for 'changes-requested' if you omit it, since gh requires a non-empty body "
+             "for that review type)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"pr_number", {{"type", "integer"}}},
+                      {"status",
+                       {{"type", "string"},
+                        {"description", "'open', 'closed', 'approved', or 'changes-requested'. Not 'merged'."}}},
+                      {"comment", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"repo_id", "pr_number", "status"})},
+             }},
+        },
+        {
+            {"name", "merge_pull_request"},
+            {"description",
+             "Merge a pull request via the gh CLI. merge_method is 'merge' (default), 'squash', or "
+             "'rebase'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"pr_number", {{"type", "integer"}}},
+                      {"merge_method", {{"type", "string"}, {"description", "'merge' (default), 'squash', or 'rebase'."}}},
+                  }},
+                 {"required", json::array({"repo_id", "pr_number"})},
+             }},
+        },
+        {
+            {"name", "list_issues"},
+            {"description",
+             "List a repo's issues via the gh CLI. status filters by state: 'open' (default), "
+             "'closed', or 'all'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"status", {{"type", "string"}, {"description", "'open' (default), 'closed', or 'all'."}}},
+                  }},
+                 {"required", json::array({"repo_id"})},
+             }},
+        },
+        {
+            {"name", "create_issue"},
+            {"description", "Open a new issue on a repo via the gh CLI. body is optional."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"title", {{"type", "string"}}},
+                      {"body", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"repo_id", "title"})},
+             }},
+        },
+        {
+            {"name", "set_issue_status"},
+            {"description", "Reopen or close an issue via the gh CLI. status must be 'open' or 'closed'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"repo_id", {{"type", "string"}}},
+                      {"issue_number", {{"type", "integer"}}},
+                      {"status", {{"type", "string"}, {"description", "'open' or 'closed'."}}},
+                  }},
+                 {"required", json::array({"repo_id", "issue_number", "status"})},
+             }},
+        },
+        {
             {"name", "request_new_tool"},
             {"description",
              "Ask Cardon for a brand-new tool, or for an existing tool's functionality to be extended, "
@@ -1283,6 +1659,20 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = RequestTemporaryPermission(ctx, arguments, outError);
     } else if (toolName == "create_pull_request") {
         result = CreatePullRequestTool(ctx, arguments, outError);
+    } else if (toolName == "list_pull_requests") {
+        result = ListPullRequestsTool(ctx, arguments, outError);
+    } else if (toolName == "get_pr_status") {
+        result = GetPrStatusTool(ctx, arguments, outError);
+    } else if (toolName == "set_pr_status") {
+        result = SetPrStatusTool(ctx, arguments, outError);
+    } else if (toolName == "merge_pull_request") {
+        result = MergePullRequestTool(ctx, arguments, outError);
+    } else if (toolName == "list_issues") {
+        result = ListIssuesTool(ctx, arguments, outError);
+    } else if (toolName == "create_issue") {
+        result = CreateIssueTool(ctx, arguments, outError);
+    } else if (toolName == "set_issue_status") {
+        result = SetIssueStatusTool(ctx, arguments, outError);
     } else if (toolName == "request_new_tool") {
         result = RequestNewTool(ctx, arguments, outError);
     } else {
