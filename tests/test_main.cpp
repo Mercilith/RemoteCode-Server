@@ -786,6 +786,60 @@ void TestMessageUserTool() {
         "a second message_user call reuses the existing dm chat (get-or-create is idempotent)");
 }
 
+// Regression test for a real bug: once an agent's entire DM history ends up
+// archived (e.g. via /close-chat, with no active DM left to detect), both
+// message_user's get-or-create and /create-dm used to unconditionally
+// regenerate the bare "dm-<agentId>" id — which, past the agent's very
+// first-ever DM, already belongs to an old archived chat — and
+// ChatStore::CreateChat's INSERT collided on that primary key, surfacing as
+// "Failed to create the DM chat (internal error)." Confirms message_user
+// picks a fresh, non-colliding id instead when the bare one is already
+// taken by an archived chat.
+void TestMessageUserToolPicksFreshIdWhenBareOneIsArchived() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    // Simulate an agent whose one-and-only DM was closed a while back —
+    // no active DM exists, but the bare id is already taken.
+    Chat archivedDm;
+    archivedDm.id = "dm-alex";
+    archivedDm.title = "alex (DM)";
+    archivedDm.createdBy = "alex";
+    archivedDm.status = "archived";
+    archivedDm.createdAt = 1;
+    chatStore.CreateChat(archivedDm);
+    chatStore.AddParticipant("dm-alex", "agent", "alex");
+
+    SeedTestAgent(agentStore, "alex", {"message_user"});
+    ActivityLog activityLog(L"test-logs", "test-message-user-collision");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        taskStore, reminderStore, activityLog, "alex", "chat-1");
+
+    const json response = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "message_user"}, {"arguments", {{"content", "hi again"}}}}},
+    }.dump()));
+    Check(
+        response["result"]["isError"] == false,
+        "message_user succeeds even when the bare dm-<agentId> id is already archived");
+
+    const std::vector<Message> archivedMessages = chatStore.RecentMessages("dm-alex", 10);
+    Check(archivedMessages.empty(), "message_user does not resurrect the archived chat");
+}
+
 void TestUpdateAgentTool() {
     Database db;
     db.Open(L":memory:");
@@ -3024,6 +3078,7 @@ int main() {
     RUN(TestChatParticipationEnforcement);
     RUN(TestApprovalWorkflowTool);
     RUN(TestMessageUserTool);
+    RUN(TestMessageUserToolPicksFreshIdWhenBareOneIsArchived);
     RUN(TestUpdateAgentTool);
     RUN(TestToolPermissionEnforcement);
     RUN(TestRememberTool);

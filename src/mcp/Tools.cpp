@@ -17,6 +17,26 @@ using nlohmann::json;
 
 namespace {
 
+// Mirrors Orchestrator.cpp's PickUniqueDmChatId (same rationale/comment
+// there — the bare "dm-<agentId>" id is only safe on an agent's very
+// first-ever DM; reusing it once it belongs to an old, archived chat
+// collides with ChatStore::CreateChat's primary key, which is exactly what
+// used to produce a bare "failed to create the DM chat" error here whenever
+// an agent's entire DM history happened to be archived).
+std::string PickUniqueDmChatId(ChatStore& chatStore, const std::string& agentId) {
+    const std::string bare = "dm-" + agentId;
+    Chat existing;
+    if (!chatStore.GetChat(bare, existing)) {
+        return bare;
+    }
+    for (int64_t ts = static_cast<int64_t>(time(nullptr));; ++ts) {
+        const std::string candidate = "dm-" + agentId + "-" + std::to_string(ts);
+        if (!chatStore.GetChat(candidate, existing)) {
+            return candidate;
+        }
+    }
+}
+
 // Falls back to ctx.chatId ("the chat this turn is happening in") when the
 // caller doesn't pass an explicit chat_id — the model never sees our
 // internal chat ids in its context, so requiring it to supply one for the
@@ -87,14 +107,14 @@ json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError)
     // hardcoded "dm-<agentId>" — /create-dm can retire that chat and start a
     // fresh one under a different id (see Orchestrator::HandleSlashCommandCreateDm),
     // and message_user must follow along to whatever's current rather than
-    // resurrecting an archived conversation. Falls back to creating the
-    // original "dm-<agentId>" id if this agent has no DM yet at all. Every
-    // id used here still starts with "dm-", which is the actual signal
+    // resurrecting an archived conversation. Falls back to creating a fresh
+    // one (PickUniqueDmChatId) if this agent has no active DM. Every id
+    // used here still starts with "dm-", which is the actual signal
     // Orchestrator uses to skip @mention dispatch for these messages (a DM
     // chat only ever has one agent).
     Chat dmChat;
     if (!ctx.chatStore.GetActiveDmChatForAgent(ctx.agentId, dmChat)) {
-        dmChat.id = "dm-" + ctx.agentId;
+        dmChat.id = PickUniqueDmChatId(ctx.chatStore, ctx.agentId);
         dmChat.title = ctx.agentId + " (DM)";
         dmChat.createdBy = ctx.agentId;
         dmChat.status = "active";

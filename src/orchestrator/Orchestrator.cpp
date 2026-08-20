@@ -199,6 +199,35 @@ constexpr int64_t kSummaryThreshold = 60;
 // run (e.g. after downtime).
 constexpr int kSummaryInputCap = 150;
 
+// Picks a chat id for a brand-new DM with `agentId`, guaranteed not to
+// collide with any EXISTING chat row regardless of its status. The bare
+// "dm-<agentId>" id is only safe to reuse the very first time an agent is
+// ever DM'd — after that (an old DM closed via /close-chat, or archived by
+// a later /create-dm recreating it), that id permanently belongs to an
+// archived row, and reusing it would make ChatStore::CreateChat's INSERT
+// collide on the primary key (this is exactly what "Failed to create the
+// DM chat (internal error)." meant — a real bug, not a placeholder message:
+// the previous logic only checked whether an ACTIVE DM currently existed,
+// not whether the bare id had EVER been used, so an agent whose entire DM
+// history happened to be archived — no currently-active one to detect —
+// would always regenerate the already-taken bare id and fail). Nudges the
+// timestamp forward a second at a time on the (rare) chance of a same-
+// second collision. Mirrored in mcp/Tools.cpp's MessageUser tool for its
+// own get-or-create path — same fix needed there for the same reason.
+std::string PickUniqueDmChatId(ChatStore& chatStore, const std::string& agentId) {
+    const std::string bare = "dm-" + agentId;
+    Chat existing;
+    if (!chatStore.GetChat(bare, existing)) {
+        return bare;
+    }
+    for (int64_t ts = static_cast<int64_t>(time(nullptr));; ++ts) {
+        const std::string candidate = "dm-" + agentId + "-" + std::to_string(ts);
+        if (!chatStore.GetChat(candidate, existing)) {
+            return candidate;
+        }
+    }
+}
+
 } // namespace
 
 void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
@@ -1517,15 +1546,14 @@ void Orchestrator::HandleSlashCommandCreateDm(const std::string& agentRaw, const
         }
     }
 
-    // The very first DM with an agent keeps the plain "dm-<agentId>" id
-    // (matches MessageUser's get-or-create default and any pre-existing
-    // live data); every DM created after that needs a distinct id since
-    // "dm-<agentId>" now belongs to the just-archived chat. Either way the
-    // "dm-" prefix is what the rest of the system (mention-dispatch
+    // See PickUniqueDmChatId's comment — the bare "dm-<agentId>" id is only
+    // safe on an agent's very first-ever DM; any later one (including this
+    // recreate) needs a distinct id since the bare one may already belong
+    // to an archived chat, not just the one just archived above. The "dm-"
+    // prefix itself is what the rest of the system (mention-dispatch
     // skipping, EnsureChannelForChat's DM branch) actually keys off of, not
     // the exact suffix.
-    const std::string dmChatId =
-        previousDm.id.empty() ? "dm-" + agent.id : "dm-" + agent.id + "-" + std::to_string(time(nullptr));
+    const std::string dmChatId = PickUniqueDmChatId(*chatStore_, agent.id);
 
     Chat dmChat;
     dmChat.id = dmChatId;
