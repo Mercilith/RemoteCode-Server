@@ -20,6 +20,27 @@ std::wstring AsciiToWide(const std::string& s) {
     return std::wstring(s.begin(), s.end());
 }
 
+// Mirrors WorkspacePr.cpp/GitHubOps.cpp's QuoteArg rather than exporting it
+// -- same small-enough-not-to-share rationale given there. `name` below is
+// LLM/agent-supplied via the create_repo tool with no charset validation, so
+// unlike repoDisplayName (built from org/repo strings GitHubRepo::ParseGitHubUrl
+// already validated), it genuinely needs this: a literal `"..."`-wrapped
+// argument with no escaping lets an embedded `"` in `name` break out of its
+// quoted segment and inject extra argv tokens into the gh.exe invocation.
+std::wstring QuoteArg(const std::string& arg) {
+    std::wstring escaped;
+    escaped.reserve(arg.size() + 2);
+    escaped.push_back(L'"');
+    for (const char c : arg) {
+        if (c == '"') {
+            escaped.push_back(L'\\');
+        }
+        escaped.push_back(static_cast<wchar_t>(c));
+    }
+    escaped.push_back(L'"');
+    return escaped;
+}
+
 std::string WideToUtf8(const std::wstring& wide) {
     if (wide.empty()) {
         return {};
@@ -132,7 +153,7 @@ Result Import(RepoStore& repoStore, const std::string& githubUrl, const std::str
     // afterward, this tool call has nothing further to do once the clone
     // finishes, so there's no reason to return before it's actually done.
     const std::wstring commandLine =
-        L"gh.exe repo clone \"" + AsciiToWide(repoDisplayName) + L"\" \"" + localPath + L"\"";
+        L"gh.exe repo clone " + QuoteArg(repoDisplayName) + L" \"" + localPath + L"\"";
     std::string output;
     int exitCode = -1;
     if (!ProcessRunner::RunCommand(commandLine, L"", output, exitCode)) {
@@ -161,7 +182,7 @@ Result CreateAndImport(RepoStore& repoStore, const std::string& name, const std:
         return result;
     }
 
-    const std::wstring commandLine = L"gh.exe repo create \"" + AsciiToWide(name) + L"\" --private";
+    const std::wstring commandLine = L"gh.exe repo create " + QuoteArg(name) + L" --private";
     std::string output;
     int exitCode = -1;
     if (!ProcessRunner::RunCommand(commandLine, L"", output, exitCode)) {
