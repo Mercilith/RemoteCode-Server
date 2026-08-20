@@ -185,6 +185,14 @@ CREATE TABLE IF NOT EXISTS schema_meta (
     value  TEXT NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS chat_agent_grants (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      TEXT NOT NULL,
+    agent_id     TEXT NOT NULL,
+    created_at   INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace

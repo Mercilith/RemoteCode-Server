@@ -545,7 +545,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 33, "McpServer: tools/list returns exactly 33 tools");
+    Check(tools.is_array() && tools.size() == 34, "McpServer: tools/list returns exactly 34 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -2417,6 +2417,121 @@ void TestRequestAddAgentToChatTool() {
     Check(chatStore.IsParticipant("chat-1", "agent", "bob"), "bob is a participant after the approval resolves");
 }
 
+void TestAddAgentToChatTool() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+
+    Chat otherChat;
+    otherChat.id = "chat-2";
+    otherChat.createdBy = "user";
+    otherChat.status = "active";
+    otherChat.discordChannelId = "2";
+    otherChat.createdAt = 1;
+    chatStore.CreateChat(otherChat);
+
+    SeedTestAgent(agentStore, "tyrell", {"add_agent_to_chat"});
+    Agent tyrell;
+    agentStore.Get("tyrell", tyrell);
+    tyrell.canMessageJson = json::array({"*"}).dump();
+    agentStore.Upsert(tyrell);
+    chatStore.AddParticipant("chat-1", "agent", "tyrell");
+
+    SeedTestAgent(agentStore, "sable", {});
+
+    ActivityLog activityLog(L"test-logs", "test-add-agent-to-chat");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        "tyrell", "chat-1");
+
+    const std::string call = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "add_agent_to_chat"}, {"arguments", {{"target_agent_id", "sable"}}}}},
+    }.dump();
+    const json response = json::parse(server.HandleLine(call));
+    Check(response["result"]["isError"] == false, "add_agent_to_chat succeeds with no approval step");
+    Check(
+        chatStore.IsParticipant("chat-1", "agent", "sable"),
+        "add_agent_to_chat adds the target as a chat participant immediately");
+
+    const std::vector<ChatStore::PendingAgentGrant> pendingGrants = chatStore.ListPendingAgentGrants();
+    Check(
+        pendingGrants.size() == 1 && pendingGrants[0].chatId == "chat-1" && pendingGrants[0].agentId == "sable",
+        "add_agent_to_chat leaves a pending Discord-access grant for Orchestrator to pick up");
+
+    // Already a participant — rejected on a repeat call.
+    const json repeatResponse = json::parse(server.HandleLine(call));
+    Check(
+        repeatResponse["result"]["isError"] == true,
+        "add_agent_to_chat rejects a target already in the chat");
+
+    // Unknown target agent is rejected.
+    const std::string unknownCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "add_agent_to_chat"}, {"arguments", {{"target_agent_id", "no-such-agent"}}}}},
+    }.dump();
+    const json unknownResponse = json::parse(server.HandleLine(unknownCall));
+    Check(unknownResponse["result"]["isError"] == true, "add_agent_to_chat rejects an unknown target agent");
+
+    // An explicit chat_id the caller isn't a participant of is rejected.
+    SeedTestAgent(agentStore, "wren", {});
+    const std::string otherChatCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "add_agent_to_chat"}, {"arguments", {{"target_agent_id", "wren"}, {"chat_id", "chat-2"}}}}},
+    }.dump();
+    const json otherChatResponse = json::parse(server.HandleLine(otherChatCall));
+    Check(
+        otherChatResponse["result"]["isError"] == true,
+        "add_agent_to_chat rejects an explicit chat_id the caller isn't a participant of");
+
+    // can_message gates the target the same way request_add_agent_to_chat does.
+    SeedTestAgent(agentStore, "restricted", {"add_agent_to_chat"});
+    Agent restricted;
+    agentStore.Get("restricted", restricted);
+    restricted.canMessageJson = json::array().dump(); // allowed to message no one
+    agentStore.Upsert(restricted);
+    chatStore.AddParticipant("chat-1", "agent", "restricted");
+
+    McpServer restrictedServer(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        "restricted", "chat-1");
+    SeedTestAgent(agentStore, "unreachable", {});
+    const std::string blockedCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 4},
+        {"method", "tools/call"},
+        {"params", {{"name", "add_agent_to_chat"}, {"arguments", {{"target_agent_id", "unreachable"}}}}},
+    }.dump();
+    const json blockedResponse = json::parse(restrictedServer.HandleLine(blockedCall));
+    Check(
+        blockedResponse["result"]["isError"] == true,
+        "add_agent_to_chat rejects a target the caller's can_message doesn't permit messaging");
+}
+
 void TestAddAgentToWorkspaceTool() {
     Database db;
     db.Open(L":memory:");
@@ -3212,6 +3327,7 @@ int main() {
     RUN(TestListAgentsToolFiltersByAgentIdAndSections);
     RUN(TestStartChatAndListMyChatsTools);
     RUN(TestRequestAddAgentToChatTool);
+    RUN(TestAddAgentToChatTool);
     RUN(TestAddAgentToWorkspaceTool);
     RUN(TestRequestTemporaryPermissionTool);
     RUN(TestRequestNewToolTool);

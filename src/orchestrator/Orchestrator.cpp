@@ -986,6 +986,12 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     // access to the (already-existing, by definition) workspace channel.
     SyncPendingWorkspaceAgentGrants();
 
+    // Same rationale again — add_agent_to_chat (the direct, no-approval
+    // counterpart to request_add_agent_to_chat) also only does the DB write
+    // from the MCP subprocess; this grants the joining agent's own bot
+    // access to the (already-existing, by definition) chat channel.
+    SyncPendingChatAgentGrants();
+
     // Best-effort summary housekeeping — once per HandleIncomingMessage
     // call (not once per agent turn above), after real dispatch is done.
     RefreshChatSummaryIfNeeded(chatId);
@@ -1776,6 +1782,32 @@ void Orchestrator::SyncPendingWorkspaceAgentGrants() {
             discordBot_->GrantChannelAccess(chat.discordChannelId, agent.discordBotUserId);
         }
         workspaceStore_->ClearPendingAgentGrant(grant.workspaceId, grant.agentId);
+    }
+}
+
+void Orchestrator::SyncPendingChatAgentGrants() {
+    for (const ChatStore::PendingAgentGrant& grant : chatStore_->ListPendingAgentGrants()) {
+        Agent agent;
+        Chat chat;
+        if (!agentStore_->Get(grant.agentId, agent) || agent.status != "active" ||
+            !chatStore_->GetChat(grant.chatId, chat)) {
+            // Nothing sensible to grant — drop the pending row rather than
+            // retrying forever against a chat/agent that no longer exists
+            // or is disabled.
+            chatStore_->ClearPendingAgentGrant(grant.chatId, grant.agentId);
+            continue;
+        }
+
+        if (chat.discordChannelId.empty()) {
+            continue; // channel doesn't exist yet (e.g. a fresh DM) — leave pending, retry next tick
+        }
+
+        // Shared-webhook agents (no own bot) need nothing extra — same rule
+        // as every other "grant channel access" call site in this file.
+        if (!agent.discordBotUserId.empty()) {
+            discordBot_->GrantChannelAccess(chat.discordChannelId, agent.discordBotUserId);
+        }
+        chatStore_->ClearPendingAgentGrant(grant.chatId, grant.agentId);
     }
 }
 

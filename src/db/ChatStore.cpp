@@ -461,6 +461,41 @@ std::vector<Message> ChatStore::MessagesBySenderAfter(const std::string& senderI
     return messages;
 }
 
+bool ChatStore::AddPendingAgentGrant(const std::string& chatId, const std::string& agentId, int64_t createdAt) {
+    Statement stmt(db_, "INSERT INTO chat_agent_grants (chat_id, agent_id, created_at) VALUES (?1,?2,?3);");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, chatId);
+    stmt.BindText(2, agentId);
+    stmt.BindInt64(3, createdAt);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+std::vector<ChatStore::PendingAgentGrant> ChatStore::ListPendingAgentGrants() {
+    std::vector<PendingAgentGrant> grants;
+    Statement stmt(db_, "SELECT chat_id, agent_id FROM chat_agent_grants ORDER BY created_at ASC;");
+    if (!stmt.Valid()) {
+        return grants;
+    }
+    while (stmt.Step()) {
+        grants.push_back(PendingAgentGrant{stmt.ColumnText(0), stmt.ColumnText(1)});
+    }
+    return grants;
+}
+
+bool ChatStore::ClearPendingAgentGrant(const std::string& chatId, const std::string& agentId) {
+    Statement stmt(db_, "DELETE FROM chat_agent_grants WHERE chat_id = ?1 AND agent_id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, chatId);
+    stmt.BindText(2, agentId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
 bool ChatStore::GetWebhook(
     const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
     std::string& outWebhookToken) {

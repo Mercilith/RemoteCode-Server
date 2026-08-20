@@ -162,6 +162,12 @@ public:
     // live Discord connection. Called from the same housekeeping spot as
     // EnsurePendingWorkspaceChannels/PostPendingApprovals.
     void SyncPendingWorkspaceAgentGrants();
+    // Same idea as SyncPendingWorkspaceAgentGrants but for the direct
+    // add_agent_to_chat MCP tool (see mcp/Tools.cpp's AddAgentToChat) —
+    // polls ChatStore::ListPendingAgentGrants and grants each newly-joined
+    // agent's own Discord bot access to that chat's already-existing
+    // channel. Called from the same housekeeping spot.
+    void SyncPendingChatAgentGrants();
 
 private:
     // Runs on a periodic background thread (~15-30s poll, started alongside

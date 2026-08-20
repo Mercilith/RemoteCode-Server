@@ -131,6 +131,23 @@ public:
     // one chat.
     int64_t LatestMessageId();
 
+    // An agent joining a chat via the direct add_agent_to_chat MCP tool
+    // (which runs in the MCP subprocess, with no live Discord connection)
+    // needs its own bot (if it has one) granted access to that chat's
+    // already-existing Discord channel — a step only the main process
+    // (which owns the real DiscordBot) can perform. AddPendingAgentGrant
+    // records that this still needs doing; Orchestrator::
+    // SyncPendingChatAgentGrants polls ListPendingAgentGrants (same
+    // "housekeeping poll" pattern as WorkspaceStore's identically-shaped
+    // pending-grant mechanism) and calls ClearPendingAgentGrant once done.
+    struct PendingAgentGrant {
+        std::string chatId;
+        std::string agentId;
+    };
+    bool AddPendingAgentGrant(const std::string& chatId, const std::string& agentId, int64_t createdAt);
+    std::vector<PendingAgentGrant> ListPendingAgentGrants();
+    bool ClearPendingAgentGrant(const std::string& chatId, const std::string& agentId);
+
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
         std::string& outWebhookToken);

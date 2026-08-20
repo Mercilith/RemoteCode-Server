@@ -589,6 +589,74 @@ json RequestAddAgentToChat(ToolContext& ctx, const json& arguments, std::string&
     return json{{"status", "pending_approval"}, {"target_agent_id", targetId}, {"chat_id", ctx.chatId}};
 }
 
+// Direct counterpart to RequestAddAgentToChat/HandleReaction's
+// "add_agent_to_chat" approval flow — no human sign-off, so it's for the
+// low-stakes case (an agent needs a teammate it's already allowed to
+// message in on a conversation right now) rather than every add needing a
+// checkmark. Same eligibility rules as the request path (target must be a
+// known active agent, not already in the chat, and covered by the caller's
+// can_message) — approval was never the thing enforcing those, so skipping
+// it doesn't skip any real safety check.
+json AddAgentToChat(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("target_agent_id")) {
+        outError = "add_agent_to_chat requires 'target_agent_id'";
+        return {};
+    }
+    const std::string chatId = ResolveChatId(ctx, arguments);
+    if (chatId.empty()) {
+        outError = "add_agent_to_chat has no current chat to add into";
+        return {};
+    }
+    if (arguments.contains("chat_id") && !CallerIsParticipant(ctx, chatId)) {
+        outError = "add_agent_to_chat: you are not a participant of that chat";
+        return {};
+    }
+
+    const std::string targetId = arguments["target_agent_id"].get<std::string>();
+    Agent target;
+    if (!ctx.agentStore.Get(targetId, target) || target.status != "active") {
+        outError = "add_agent_to_chat: '" + targetId + "' is not a known, active agent";
+        return {};
+    }
+    if (ctx.chatStore.IsParticipant(chatId, "agent", targetId)) {
+        outError = "'" + targetId + "' is already a participant of this chat";
+        return {};
+    }
+
+    Agent sender;
+    if (!ctx.agentStore.Get(ctx.agentId, sender)) {
+        outError = "internal error: calling agent '" + ctx.agentId + "' not found";
+        return {};
+    }
+    if (!Mentions::IsAllowedToMessage(sender, targetId)) {
+        outError = "add_agent_to_chat: you are not allowed to message '" + targetId + "' (see can_message)";
+        return {};
+    }
+
+    if (!ctx.chatStore.AddParticipant(chatId, "agent", targetId)) {
+        outError = "failed to add '" + targetId + "' to the chat";
+        return {};
+    }
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    // Grants the joining agent's own bot (if it has one) access to the
+    // chat's Discord channel — only the live Orchestrator process (which
+    // owns the real DiscordBot) can do that, so this just records that it
+    // still needs doing; see Orchestrator::SyncPendingChatAgentGrants.
+    ctx.chatStore.AddPendingAgentGrant(chatId, targetId, now);
+
+    Message message;
+    message.chatId = chatId;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "system_event";
+    message.content = sender.name + " added " + target.name + " to this chat.";
+    message.createdAt = now;
+    ctx.chatStore.InsertMessage(message);
+
+    return json{{"status", "added"}, {"target_agent_id", targetId}, {"chat_id", chatId}};
+}
+
 // The only two template names this tool surface allows viewing/editing —
 // deliberately not open to arbitrary new names (see PromptTemplateNames in
 // db/PromptTemplateStore.h, the single source of truth both this file and
@@ -748,7 +816,7 @@ bool IsKnownToolName(const std::string& name) {
     static const std::vector<std::string> kKnown = {
         "post_message",     "read_chat",         "message_user",        "submit_agent_for_approval",
         "update_agent",     "remember",          "list_agents",         "list_my_chats",
-        "start_chat",       "request_add_agent_to_chat", "get_prompt_template", "update_prompt_template",
+        "start_chat",       "request_add_agent_to_chat", "add_agent_to_chat", "get_prompt_template", "update_prompt_template",
         "create_workspace", "add_agent_to_workspace",    "create_pull_request",
         "list_pull_requests", "get_pr_status",     "set_pr_status",       "merge_pull_request",
         "list_issues",       "create_issue",       "set_issue_status",
@@ -1676,6 +1744,28 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "add_agent_to_chat"},
+            {"description",
+             "Directly add another agent into a chat — no approval needed, joins immediately. Defaults "
+             "to the current chat; pass chat_id to target a different one you're already a participant "
+             "of. Rejected if the target isn't a known active agent, is already in that chat, or your "
+             "can_message doesn't permit messaging them. Use this instead of "
+             "request_add_agent_to_chat when you don't need Cardon's sign-off first — e.g. pulling in a "
+             "repo's own expert agent to help with something already underway."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"target_agent_id", {{"type", "string"}}},
+                      {"chat_id",
+                       {{"type", "string"},
+                        {"description", "Defaults to the current chat if omitted."}}},
+                  }},
+                 {"required", json::array({"target_agent_id"})},
+             }},
+        },
+        {
             {"name", "get_prompt_template"},
             {"description",
              "Read one of the two built-in, server-authored repo-onboarding prompt templates by name "
@@ -2164,6 +2254,8 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = StartChat(ctx, arguments, outError);
     } else if (toolName == "request_add_agent_to_chat") {
         result = RequestAddAgentToChat(ctx, arguments, outError);
+    } else if (toolName == "add_agent_to_chat") {
+        result = AddAgentToChat(ctx, arguments, outError);
     } else if (toolName == "get_prompt_template") {
         result = GetPromptTemplate(ctx, arguments, outError);
     } else if (toolName == "update_prompt_template") {
