@@ -179,6 +179,12 @@ CREATE TABLE IF NOT EXISTS reminders (
     created_at   INTEGER NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+)sql",
 };
 
 } // namespace
@@ -241,14 +247,30 @@ bool Schema::EnsureCreated(Database& db) {
     // then correctly (per its own logic) queued and ran a real turn for
     // every one of them on every message in that DM, each one showing a
     // typing indicator and burning real API usage before coming back
-    // silent. This DELETE is idempotent (no-op once the bad rows are gone)
-    // and safe to run on every startup: a DM chat is always exactly one
-    // agent (see EnsureMentionedParticipantsJoined's early-return for
-    // "dm-" chat ids, and MessageUser's/HandleSlashCommandCreateDm's own
-    // single-AddParticipant-call construction), so anything in a "dm-%"
-    // chat that isn't that chat's own encoded agent id is unconditionally
-    // wrong and safe to remove.
-    if (!db.Exec(R"sql(
+    // silent.
+    //
+    // This MUST run at most once, ever, per database — NOT on every
+    // startup as the original version of this comment claimed. EnsureCreated
+    // runs on every single MCP subprocess launch (see main.cpp's
+    // TryRunMcpServer, invoked once per agent turn), not just when the main
+    // Orchestrator process boots. And a "dm-" chat is no longer always
+    // exactly one agent: Orchestrator::HandleReaction's "add_agent_to_chat"
+    // approval kind deliberately grows a DM into a multi-agent chat by
+    // adding a second agent as an ordinary chat_participants row (see its
+    // comment). Re-running this DELETE unconditionally on every turn was
+    // wiping that second agent back out again almost immediately — often
+    // before they ever got a chance to act on the conversation — which is
+    // indistinguishable from the agent simply never showing up. The
+    // schema_meta marker makes sure this only ever fires once, against
+    // whatever pre-existing corruption is on disk from the old bug; any
+    // agent legitimately added to a DM after that always survives.
+    {
+        Statement alreadyRepaired(db, "SELECT 1 FROM schema_meta WHERE key = 'dm_participant_cleanup_v1';");
+        if (!alreadyRepaired.Valid()) {
+            return false;
+        }
+        if (!alreadyRepaired.Step()) {
+            if (!db.Exec(R"sql(
 DELETE FROM chat_participants
 WHERE chat_id LIKE 'dm-%'
   AND NOT (
@@ -256,7 +278,13 @@ WHERE chat_id LIKE 'dm-%'
     AND (chat_id = 'dm-' || participant_id OR chat_id LIKE 'dm-' || participant_id || '-%')
   );
 )sql")) {
-        return false;
+                return false;
+            }
+            if (!db.Exec(
+                    "INSERT INTO schema_meta (key, value) VALUES ('dm_participant_cleanup_v1', '1');")) {
+                return false;
+            }
+        }
     }
 
     return true;

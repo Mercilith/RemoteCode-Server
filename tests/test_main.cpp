@@ -99,14 +99,23 @@ void TestSchema() {
 // story): DiscordBot::HandleMessageCreate used to add every active agent
 // (plus a 'user' row) to whatever chat a human's Discord message landed in,
 // including chats — like DMs — that already had a deliberately curated
-// participant list. Confirms the one-time cleanup migration in
-// Schema::EnsureCreated strips exactly the bogus rows from a corrupted DM
-// chat, leaves that chat's own rightful agent alone, and doesn't touch a
-// non-DM chat's participants at all.
+// participant list. Confirms the cleanup migration in Schema::EnsureCreated
+// strips exactly the bogus rows from a corrupted DM chat (once), leaves
+// that chat's own rightful agent alone, and doesn't touch a non-DM chat's
+// participants at all.
 void TestDmParticipantCleanupMigration() {
     Database db;
     db.Open(L":memory:");
+    // First-ever EnsureCreated on a fresh db: nothing to clean up yet, but
+    // this is also the call that plants the schema_meta marker — reproduce
+    // "an old, pre-marker database that still has the historical bug's
+    // corrupted rows on disk" by deleting the marker back out before
+    // seeding the corrupted data below, since a brand new :memory: db can
+    // never actually be in that state on its own.
     Schema::EnsureCreated(db);
+    Check(
+        db.Exec("DELETE FROM schema_meta WHERE key = 'dm_participant_cleanup_v1';"),
+        "Schema: test setup can clear the cleanup marker");
     ChatStore chatStore(db);
 
     Chat corruptedDm;
@@ -131,7 +140,8 @@ void TestDmParticipantCleanupMigration() {
     chatStore.AddParticipant("chat-abc", "user", "439463673333940225");
 
     // Re-running EnsureCreated (already proven idempotent in TestSchema) is
-    // what applies the cleanup migration against these freshly-seeded rows.
+    // what applies the cleanup migration against these freshly-seeded rows,
+    // since the marker was cleared above.
     Check(Schema::EnsureCreated(db), "Schema: EnsureCreated re-run applies the DM cleanup migration");
 
     const std::vector<std::string> dmAgents = chatStore.ListParticipantAgentIds("dm-tyrell-12345");
@@ -151,6 +161,22 @@ void TestDmParticipantCleanupMigration() {
     Check(
         chatStore.IsParticipant("chat-abc", "user", "439463673333940225"),
         "Schema: DM cleanup leaves a non-DM chat's 'user' participant untouched");
+
+    // The marker is now set (this run consumed it) — a legitimately added
+    // second DM agent (Orchestrator::HandleReaction's "add_agent_to_chat"
+    // approval flow) must survive every subsequent EnsureCreated call
+    // (i.e. every later agent turn/server restart), not just get treated
+    // as more of the same "bogus" shape the migration used to strip.
+    chatStore.AddParticipant("dm-tyrell-12345", "agent", "sable");
+    Check(Schema::EnsureCreated(db), "Schema: EnsureCreated runs again after the marker is set");
+    Check(Schema::EnsureCreated(db), "Schema: EnsureCreated runs a third time after the marker is set");
+    const std::vector<std::string> dmAgentsAfter = chatStore.ListParticipantAgentIds("dm-tyrell-12345");
+    Check(
+        dmAgentsAfter.size() == 2 &&
+            std::find(dmAgentsAfter.begin(), dmAgentsAfter.end(), "tyrell") != dmAgentsAfter.end() &&
+            std::find(dmAgentsAfter.begin(), dmAgentsAfter.end(), "sable") != dmAgentsAfter.end(),
+        "Schema: a legitimately added second DM agent survives later EnsureCreated calls "
+        "once the cleanup marker is set");
 }
 
 void TestAgentStore() {
@@ -2700,34 +2726,60 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
         rememberResponse["result"]["isError"] == false,
         "remember succeeds for an agent with empty tool_permissions — it's always allowed");
 
-    // read_chat is NOT always-allowed and tyrell has no permanent grant for
-    // it — must fail closed before any temp grant exists.
-    const std::string readChatCall = json{
+    // list_my_chats and read_chat (default, no explicit chat_id) are also
+    // baseline tools every agent needs just to function in a chat — must
+    // succeed even with empty tool_permissions and no temp grant.
+    const std::string listMyChatsCall = json{
         {"jsonrpc", "2.0"},
-        {"id", 2},
+        {"id", 10},
+        {"method", "tools/call"},
+        {"params", {{"name", "list_my_chats"}, {"arguments", json::object()}}},
+    }.dump();
+    const json listMyChatsResponse = json::parse(server.HandleLine(listMyChatsCall));
+    Check(
+        listMyChatsResponse["result"]["isError"] == false,
+        "list_my_chats succeeds for an agent with empty tool_permissions — it's always allowed");
+
+    const std::string readChatDefaultCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 11},
         {"method", "tools/call"},
         {"params", {{"name", "read_chat"}, {"arguments", json::object()}}},
     }.dump();
-    const json deniedResponse = json::parse(server.HandleLine(readChatCall));
-    Check(deniedResponse["result"]["isError"] == true, "read_chat is denied with no permanent or temp grant");
-
-    // Grant a one-time use of read_chat (simulates HandleReaction's approval
-    // handling for a temp_tool_permission approval) — the very next call
-    // succeeds, and the grant is then consumed.
+    const json readChatDefaultResponse = json::parse(server.HandleLine(readChatDefaultCall));
     Check(
-        tempPermissionStore.Grant("tyrell", "read_chat", 1), "TempPermissionStore: Grant succeeds ahead of a call");
-    const json firstAllowedResponse = json::parse(server.HandleLine(readChatCall));
+        readChatDefaultResponse["result"]["isError"] == false,
+        "read_chat succeeds for an agent with empty tool_permissions — it's always allowed");
+
+    // post_message is NOT always-allowed and tyrell has no permanent grant
+    // for it — must fail closed before any temp grant exists.
+    const std::string postMessageCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"content", "hello"}}}}},
+    }.dump();
+    const json deniedResponse = json::parse(server.HandleLine(postMessageCall));
+    Check(deniedResponse["result"]["isError"] == true, "post_message is denied with no permanent or temp grant");
+
+    // Grant a one-time use of post_message (simulates HandleReaction's
+    // approval handling for a temp_tool_permission approval) — the very
+    // next call succeeds, and the grant is then consumed.
+    Check(
+        tempPermissionStore.Grant("tyrell", "post_message", 1),
+        "TempPermissionStore: Grant succeeds ahead of a call");
+    const json firstAllowedResponse = json::parse(server.HandleLine(postMessageCall));
     Check(
         firstAllowedResponse["result"]["isError"] == false,
-        "read_chat succeeds once an active temp grant covers it");
+        "post_message succeeds once an active temp grant covers it");
     Check(
-        !tempPermissionStore.HasActiveGrant("tyrell", "read_chat"),
+        !tempPermissionStore.HasActiveGrant("tyrell", "post_message"),
         "the temp grant is consumed after the call that used it succeeds");
 
-    const json secondDeniedResponse = json::parse(server.HandleLine(readChatCall));
+    const json secondDeniedResponse = json::parse(server.HandleLine(postMessageCall));
     Check(
         secondDeniedResponse["result"]["isError"] == true,
-        "a second read_chat call after the grant is consumed is denied again");
+        "a second post_message call after the grant is consumed is denied again");
 }
 
 void TestTaskStore() {

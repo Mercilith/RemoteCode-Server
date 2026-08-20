@@ -1467,8 +1467,19 @@ json RequestNewTool(ToolContext& ctx, const json& arguments, std::string& outErr
 // that touches Discord, other agents, or the filesystem), and
 // request_temporary_permission has to be universally callable or an agent
 // that lacks everything else would have no way to ask for anything either.
+//
+// list_my_chats and read_chat (with no explicit chat_id — see ReadChat's own
+// CallerIsParticipant gate for the explicit-chat_id case) are baseline chat
+// tools for the same reason: an agent cannot do its job at all without being
+// able to see what chats it's in and read the one it's currently running a
+// turn in. This is a real gap that showed up live — an agent got added to a
+// chat and immediately had both calls blocked with "not permitted", stalling
+// it indefinitely since create_agent's tool_permissions defaults are set at
+// creation time and can silently miss tools like this one that only matter
+// once an agent starts actually participating in multi-agent conversations.
 bool IsAlwaysAllowedTool(const std::string& toolName) {
-    return toolName == "remember" || toolName == "request_temporary_permission" || toolName == "request_new_tool";
+    return toolName == "remember" || toolName == "request_temporary_permission" ||
+           toolName == "request_new_tool" || toolName == "list_my_chats" || toolName == "read_chat";
 }
 
 } // namespace
