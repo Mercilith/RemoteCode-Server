@@ -104,7 +104,7 @@ AdminServer::AdminServer(
     AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
     RepoStore& repoStore, WorkspaceStore& workspaceStore, PromptTemplateStore& promptTemplateStore,
     std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
-    InjectMessageFn injectMessage, AddRepoFn addRepo, CreateWorkspaceFn createWorkspace)
+    InjectMessageFn injectMessage, AddRepoFn addRepo, RetryRepoFn retryRepo, CreateWorkspaceFn createWorkspace)
     : agentStore_(agentStore),
       agentSessionStore_(agentSessionStore),
       chatStore_(chatStore),
@@ -116,6 +116,7 @@ AdminServer::AdminServer(
       logDir_(std::move(logDir)),
       injectMessage_(std::move(injectMessage)),
       addRepo_(std::move(addRepo)),
+      retryRepo_(std::move(retryRepo)),
       createWorkspace_(std::move(createWorkspace)) {}
 
 AdminServer::~AdminServer() = default;
@@ -386,6 +387,19 @@ void AdminServer::Run(int port) {
             return;
         }
         SendJson(res, RepoToJson(repo));
+    });
+
+    server_->Post("/repos/:id/retry", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!retryRepo_) {
+            SendError(res, 500, "repo retry is not wired up");
+            return;
+        }
+        std::string error;
+        if (!retryRepo_(req.path_params.at("id"), error)) {
+            SendError(res, 400, error.empty() ? "could not retry repo" : error);
+            return;
+        }
+        SendJson(res, json{{"status", "cloning"}});
     });
 
     // --- Workspace endpoints ---------------------------------------------

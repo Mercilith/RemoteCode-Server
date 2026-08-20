@@ -29,6 +29,11 @@ using InjectMessageFn = std::function<nlohmann::json(
 using AddRepoFn = std::function<std::string(
     const std::string& githubUrl, const std::string& notes, std::string& outError)>;
 
+// Callback into Orchestrator::RetryRepo — same rationale as AddRepoFn above.
+// Returns false with outError set if the repo doesn't exist or isn't
+// currently "failed".
+using RetryRepoFn = std::function<bool(const std::string& repoId, std::string& outError)>;
+
 // Callback into Orchestrator::CreateWorkspace — same rationale as AddRepoFn
 // above. Returns the new workspace's id, or an empty string with outError
 // set on failure (unknown repo id/name, worktree creation failure, etc).
@@ -59,7 +64,7 @@ public:
         AgentStore& agentStore, AgentSessionStore& agentSessionStore, ChatStore& chatStore,
         RepoStore& repoStore, WorkspaceStore& workspaceStore, PromptTemplateStore& promptTemplateStore,
         std::wstring dbPath, std::string claudeConfigDir, std::wstring logDir,
-        InjectMessageFn injectMessage, AddRepoFn addRepo, CreateWorkspaceFn createWorkspace);
+        InjectMessageFn injectMessage, AddRepoFn addRepo, RetryRepoFn retryRepo, CreateWorkspaceFn createWorkspace);
     ~AdminServer();
 
     AdminServer(const AdminServer&) = delete;
@@ -81,6 +86,7 @@ private:
     std::wstring logDir_;
     InjectMessageFn injectMessage_;
     AddRepoFn addRepo_;
+    RetryRepoFn retryRepo_;
     CreateWorkspaceFn createWorkspace_;
     std::unique_ptr<httplib::Server> server_;
 };

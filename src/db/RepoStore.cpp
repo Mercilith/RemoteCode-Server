@@ -119,3 +119,15 @@ bool RepoStore::SetError(const std::string& id, const std::string& lastError, in
     stmt.Step();
     return stmt.Ok();
 }
+
+bool RepoStore::ClearError(const std::string& id, int64_t updatedAt) {
+    Statement stmt(
+        db_, "UPDATE repos SET status = 'cloning', last_error = '', updated_at = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindInt64(1, updatedAt);
+    stmt.BindText(2, id);
+    stmt.Step();
+    return stmt.Ok();
+}

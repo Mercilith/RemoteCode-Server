@@ -259,6 +259,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         [this](const std::string& githubUrl, const std::string& notes, std::string& outError) {
             return AddRepo(githubUrl, notes, outError);
         },
+        [this](const std::string& repoId, std::string& outError) { return RetryRepo(repoId, outError); },
         [this](const std::vector<std::string>& repoIdsOrNames, const std::string& title, std::string& outError) {
             return CreateWorkspace(repoIdsOrNames, title, "", outError);
         });
@@ -490,6 +491,24 @@ std::string Orchestrator::AddRepo(const std::string& githubUrl, const std::strin
 
     std::thread([this, repoId]() { RunRepoOnboarding(repoId); }).detach();
     return repoId;
+}
+
+bool Orchestrator::RetryRepo(const std::string& repoId, std::string& outError) {
+    Repo repo;
+    if (!repoStore_->Get(repoId, repo)) {
+        outError = "no repo with id '" + repoId + "'";
+        return false;
+    }
+    if (repo.status != "failed") {
+        outError = "repo '" + repoId + "' is not in a failed state (currently '" + repo.status + "')";
+        return false;
+    }
+    if (!repoStore_->ClearError(repoId, static_cast<int64_t>(time(nullptr)))) {
+        outError = "failed to reset repo status";
+        return false;
+    }
+    std::thread([this, repoId]() { RunRepoOnboarding(repoId); }).detach();
+    return true;
 }
 
 void Orchestrator::RunRepoOnboarding(const std::string& repoId) {

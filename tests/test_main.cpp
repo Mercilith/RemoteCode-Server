@@ -1261,6 +1261,13 @@ void TestRepoStore() {
         "RepoStore: Create a second repo");
     const std::vector<Repo> all = store.ListAll();
     Check(all.size() == 2, "RepoStore: ListAll returns every repo");
+
+    Check(store.ClearError("acme__widgets", 6), "RepoStore: ClearError succeeds");
+    Repo afterClear;
+    store.Get("acme__widgets", afterClear);
+    Check(
+        afterClear.status == "cloning" && afterClear.lastError.empty() && afterClear.updatedAt == 6,
+        "RepoStore: ClearError resets status to 'cloning' and empties last_error");
 }
 
 void TestWorkspaceStore() {

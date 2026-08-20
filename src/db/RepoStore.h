@@ -33,6 +33,11 @@ public:
     // Also sets status to "failed" — a repo with a recorded error is by
     // definition in the failed state.
     bool SetError(const std::string& id, const std::string& lastError, int64_t updatedAt);
+    // Resets a failed repo back to "cloning" and clears last_error — used by
+    // the retry-repo admin endpoint before re-running onboarding, so the UI
+    // doesn't keep showing a stale error message while the retry is in
+    // flight.
+    bool ClearError(const std::string& id, int64_t updatedAt);
 
 private:
     Database& db_;

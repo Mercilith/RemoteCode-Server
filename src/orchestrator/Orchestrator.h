@@ -65,6 +65,20 @@ public:
     // `/add-repo` slash command handler.
     std::string AddRepo(const std::string& githubUrl, const std::string& notes, std::string& outError);
 
+    // Re-runs onboarding for a repo currently in "failed" status (e.g. a
+    // clone that died from a transient network error) — AddRepo itself is
+    // deliberately idempotent and refuses to touch an already-known repo id,
+    // so without this a failed repo could only ever be fixed by deleting its
+    // DB row and %ProgramData% folder by hand. Clears last_error, resets
+    // status to "cloning", and kicks off RunRepoOnboarding again on a
+    // detached thread — which already skips the actual `gh repo clone` step
+    // if a `.git` directory is somehow already there, so this is safe to
+    // call even if the previous attempt partially succeeded. Returns false
+    // (with outError set) if the repo doesn't exist or isn't currently
+    // "failed" — retrying a repo that's mid-clone or already active would
+    // just race the in-flight attempt.
+    bool RetryRepo(const std::string& repoId, std::string& outError);
+
     // --- Chat-lifecycle slash commands (see DiscordBot::SetSlashCommandX
     // for wiring) — each is plain C++ bookkeeping (chat/participant DB
     // writes plus at most one Discord REST call), never an agent turn.
