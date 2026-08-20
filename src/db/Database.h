@@ -20,6 +20,13 @@ public:
 
     sqlite3* Handle() const { return db_; }
 
+    // Row count affected by the most recently completed INSERT/UPDATE/DELETE
+    // on this connection — used for atomic "claim" UPDATEs (e.g. RepoStore::
+    // TryClaimOnboarding), where a WHERE-guarded UPDATE's own affected-row
+    // count is what tells the caller whether *this* call won the claim vs.
+    // someone else already had.
+    int Changes() const;
+
 private:
     sqlite3* db_ = nullptr;
 };

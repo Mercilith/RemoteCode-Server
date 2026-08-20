@@ -7,7 +7,8 @@ std::string OrEmpty(const Statement& stmt, int index) {
 }
 
 constexpr const char* kRepoColumns =
-    "id, github_url, local_path, agent_id, status, notes, last_error, created_at, updated_at";
+    "id, github_url, local_path, agent_id, status, notes, last_error, onboarding_triggered, "
+    "created_at, updated_at";
 
 void ReadRepoRow(const Statement& stmt, Repo& out) {
     out.id = stmt.ColumnText(0);
@@ -17,8 +18,9 @@ void ReadRepoRow(const Statement& stmt, Repo& out) {
     out.status = stmt.ColumnText(4);
     out.notes = OrEmpty(stmt, 5);
     out.lastError = OrEmpty(stmt, 6);
-    out.createdAt = stmt.ColumnInt64(7);
-    out.updatedAt = stmt.ColumnInt64(8);
+    out.onboardingTriggered = stmt.ColumnInt64(7) != 0;
+    out.createdAt = stmt.ColumnInt64(8);
+    out.updatedAt = stmt.ColumnInt64(9);
 }
 
 } // namespace
@@ -130,4 +132,31 @@ bool RepoStore::ClearError(const std::string& id, int64_t updatedAt) {
     stmt.BindText(2, id);
     stmt.Step();
     return stmt.Ok();
+}
+
+bool RepoStore::TryClaimOnboarding(const std::string& id) {
+    Statement stmt(
+        db_, "UPDATE repos SET onboarding_triggered = 1 WHERE id = ?1 AND onboarding_triggered = 0;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, id);
+    stmt.Step();
+    return stmt.Ok() && db_.Changes() > 0;
+}
+
+std::vector<Repo> RepoStore::ListPendingOnboarding() {
+    std::vector<Repo> repos;
+    Statement stmt(
+        db_, std::string("SELECT ") + kRepoColumns +
+                 " FROM repos WHERE status = 'ready' AND onboarding_triggered = 0 ORDER BY created_at ASC;");
+    if (!stmt.Valid()) {
+        return repos;
+    }
+    while (stmt.Step()) {
+        Repo repo;
+        ReadRepoRow(stmt, repo);
+        repos.push_back(std::move(repo));
+    }
+    return repos;
 }

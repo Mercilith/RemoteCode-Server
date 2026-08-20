@@ -178,6 +178,14 @@ private:
     // (but still records the chat message and marks fired) if the chat has
     // no discord_channel_id yet.
     void FireDueReminders();
+    // Runs on the same periodic thread as FireDueReminders (see its call
+    // site in Run()). Polls RepoStore::ListPendingOnboarding for repos the
+    // import_repo/create_repo MCP tools (orchestrator/RepoImport.cpp) landed
+    // at status='ready' without being able to kick off the real
+    // onboarding-chat-with-Alex flow themselves (isolated MCP subprocess,
+    // no live Discord/agent access), and runs RunRepoOnboarding for each —
+    // same DB-only/main-process split as the other Ensure*/Sync* sweeps.
+    void EnsurePendingRepoOnboarding();
     // Runs a tag-driven dispatch loop for `chatId`: seeds a work queue with
     // every active participant agent (the unchanged default for a real
     // incoming user/Discord message), then for each turn mirrors every

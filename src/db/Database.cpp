@@ -28,6 +28,10 @@ void Database::Close() {
     }
 }
 
+int Database::Changes() const {
+    return db_ != nullptr ? sqlite3_changes(db_) : 0;
+}
+
 bool Database::Exec(const std::string& sql) {
     if (db_ == nullptr) {
         return false;

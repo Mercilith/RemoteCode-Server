@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS repos (
     status         TEXT NOT NULL,
     notes          TEXT,
     last_error     TEXT,
+    onboarding_triggered INTEGER NOT NULL DEFAULT 0,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL
 );
@@ -212,6 +213,21 @@ bool Schema::EnsureCreated(Database& db) {
     // 'auto_respond' (the default) participants are. See ChatStore::
     // SetParticipantMode/ListParticipantAgents.
     if (!EnsureColumn(db, "chat_participants", "mode", "TEXT NOT NULL DEFAULT 'auto_respond'")) {
+        return false;
+    }
+    // One-shot claim flag for repo onboarding (see Orchestrator::
+    // EnsurePendingRepoOnboarding) — a repo imported via the import_repo/
+    // create_repo MCP tools lands at status='ready' with no way for that
+    // isolated subprocess to kick off the onboarding-chat-with-Alex flow
+    // itself, so the live Orchestrator process periodically sweeps for
+    // status='ready' repos that haven't been claimed yet and runs
+    // RunRepoOnboarding for them. Separate from `status` because
+    // RunRepoOnboarding itself unconditionally re-sets status back to
+    // 'ready' partway through (right before creating the onboarding chat),
+    // so status alone can't distinguish "never onboarded" from "onboarding
+    // in progress" — reusing it as the gate would let the sweep re-trigger
+    // (and re-prompt Alex, re-running her onboarding turn) on every poll.
+    if (!EnsureColumn(db, "repos", "onboarding_triggered", "INTEGER NOT NULL DEFAULT 0")) {
         return false;
     }
 

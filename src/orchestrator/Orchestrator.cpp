@@ -412,6 +412,7 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
                 break;
             }
             FireDueReminders();
+            EnsurePendingRepoOnboarding();
         }
     });
 
@@ -510,6 +511,7 @@ std::string Orchestrator::AddRepo(const std::string& githubUrl, const std::strin
         return "";
     }
 
+    repoStore_->TryClaimOnboarding(repoId);
     std::thread([this, repoId]() { RunRepoOnboarding(repoId); }).detach();
     return repoId;
 }
@@ -528,8 +530,28 @@ bool Orchestrator::RetryRepo(const std::string& repoId, std::string& outError) {
         outError = "failed to reset repo status";
         return false;
     }
+    repoStore_->TryClaimOnboarding(repoId);
     std::thread([this, repoId]() { RunRepoOnboarding(repoId); }).detach();
     return true;
+}
+
+// Repos imported via the import_repo/create_repo MCP tools (src/orchestrator/
+// RepoImport.cpp) land at status='ready' with onboarding never triggered —
+// that tool runs in the isolated MCP subprocess, which can only touch the
+// DB, not kick off the real onboarding-chat-with-Alex flow (that needs a
+// live Orchestrator with agentStore_/chatStore_/discordBot_ all in the same
+// process). This periodic sweep (called from the reminderThread poll in
+// Run()) picks those up: TryClaimOnboarding's WHERE-guarded UPDATE is what
+// keeps this safe to call repeatedly without ever double-onboarding the same
+// repo — see its comment in RepoStore.h for why `status` alone can't be the
+// gate.
+void Orchestrator::EnsurePendingRepoOnboarding() {
+    for (const Repo& repo : repoStore_->ListPendingOnboarding()) {
+        if (!repoStore_->TryClaimOnboarding(repo.id)) {
+            continue; // lost the race (shouldn't happen — single-threaded caller — but safe either way)
+        }
+        RunRepoOnboarding(repo.id);
+    }
 }
 
 void Orchestrator::RunRepoOnboarding(const std::string& repoId) {

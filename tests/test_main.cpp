@@ -1367,7 +1367,8 @@ void TestRepoStore() {
         afterError.status == "failed" && afterError.lastError == "gh: repository not found",
         "RepoStore: SetError also sets status to 'failed'");
 
-    Check(store.Create(Repo{"other__repo", "https://github.com/other/repo", "C:\\x", "", "cloning", "", "", 5, 5}),
+    Check(
+        store.Create(Repo{"other__repo", "https://github.com/other/repo", "C:\\x", "", "cloning", "", "", false, 5, 5}),
         "RepoStore: Create a second repo");
     const std::vector<Repo> all = store.ListAll();
     Check(all.size() == 2, "RepoStore: ListAll returns every repo");
@@ -1378,6 +1379,22 @@ void TestRepoStore() {
     Check(
         afterClear.status == "cloning" && afterClear.lastError.empty() && afterClear.updatedAt == 6,
         "RepoStore: ClearError resets status to 'cloning' and empties last_error");
+
+    Check(!fetched.onboardingTriggered, "RepoStore: onboarding_triggered defaults to false");
+    Check(
+        store.TryClaimOnboarding("acme__widgets"), "RepoStore: TryClaimOnboarding succeeds the first time");
+    Repo afterClaim;
+    store.Get("acme__widgets", afterClaim);
+    Check(afterClaim.onboardingTriggered, "RepoStore: TryClaimOnboarding sets onboarding_triggered");
+    Check(
+        !store.TryClaimOnboarding("acme__widgets"),
+        "RepoStore: TryClaimOnboarding returns false on a repo already claimed");
+
+    store.SetStatus("other__repo", "ready", 7);
+    const std::vector<Repo> pending = store.ListPendingOnboarding();
+    Check(
+        pending.size() == 1 && pending[0].id == "other__repo",
+        "RepoStore: ListPendingOnboarding returns only ready, unclaimed repos");
 }
 
 void TestWorkspaceStore() {
