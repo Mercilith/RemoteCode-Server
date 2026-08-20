@@ -70,18 +70,29 @@ void DiscordBot::Run() {
         if (onLog_) {
             onLog_("Discord gateway ready.");
         }
+
+        // Global command (re-)registration — no guild id needed, and it's a
+        // no-op (harmless overwrite) on every reconnect, so simplest to just
+        // always do it here rather than tracking "did we already register
+        // this session." Batched into a single bulk-overwrite call rather
+        // than one global_command_create call per command: each individual
+        // create is its own request against Discord's (fairly tight)
+        // global-command-write rate limit, so on a quick reconnect (or a
+        // burst of them, e.g. during a redeploy) issuing all ~7 back to back
+        // reliably tripped it — DPP's request queue does retry after the
+        // back-off, so it wasn't actually failing, just noisy and slow to
+        // finish. One bulk call is one request no matter how many commands
+        // it carries.
+        std::vector<dpp::slashcommand> commands;
+
         if (onSlashCommandAddRepo_) {
-            // Global command registration — no guild id needed, and it's a
-            // no-op (harmless overwrite) on every reconnect, so simplest to
-            // just always do it here rather than tracking "did we already
-            // register this session."
             dpp::slashcommand addRepoCommand(
                 "add-repo", "Clone a GitHub repo and set up a dedicated expert agent for it.", bot_->me.id);
             addRepoCommand.add_option(
                 dpp::command_option(dpp::co_string, "url", "GitHub repo URL (or org/repo)", true));
             addRepoCommand.add_option(
                 dpp::command_option(dpp::co_string, "notes", "Optional notes to inject into the onboarding prompt", false));
-            bot_->global_command_create(addRepoCommand);
+            commands.push_back(addRepoCommand);
         }
         if (onSlashCommandCreateChat_) {
             dpp::slashcommand createChatCommand(
@@ -90,7 +101,7 @@ void DiscordBot::Run() {
                 dpp::co_string, "agents", "Space or comma separated agent names/ids (2 or more)", true));
             createChatCommand.add_option(
                 dpp::command_option(dpp::co_string, "title", "Optional chat title", false));
-            bot_->global_command_create(createChatCommand);
+            commands.push_back(createChatCommand);
         }
         if (onSlashCommandCreateDm_) {
             dpp::slashcommand createDmCommand(
@@ -98,14 +109,14 @@ void DiscordBot::Run() {
                 bot_->me.id);
             createDmCommand.add_option(
                 dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
-            bot_->global_command_create(createDmCommand);
+            commands.push_back(createDmCommand);
         }
         if (onSlashCommandAddAgent_) {
             dpp::slashcommand addAgentCommand(
                 "add-agent", "Add an agent to the chat this command is run in.", bot_->me.id);
             addAgentCommand.add_option(
                 dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
-            bot_->global_command_create(addAgentCommand);
+            commands.push_back(addAgentCommand);
         }
         if (onSlashCommandRemoveAgent_) {
             dpp::slashcommand removeAgentCommand(
@@ -113,12 +124,12 @@ void DiscordBot::Run() {
                 bot_->me.id);
             removeAgentCommand.add_option(
                 dpp::command_option(dpp::co_string, "agent", "Agent name or id", true));
-            bot_->global_command_create(removeAgentCommand);
+            commands.push_back(removeAgentCommand);
         }
         if (onSlashCommandCloseChat_) {
             dpp::slashcommand closeChatCommand(
                 "close-chat", "Archive this chat and delete its Discord channel.", bot_->me.id);
-            bot_->global_command_create(closeChatCommand);
+            commands.push_back(closeChatCommand);
         }
         if (onSlashCommandCreateWorkspace_) {
             dpp::slashcommand createWorkspaceCommand(
@@ -128,7 +139,11 @@ void DiscordBot::Run() {
                 dpp::co_string, "repos", "Space or comma separated repo names/ids (1 or more)", true));
             createWorkspaceCommand.add_option(
                 dpp::command_option(dpp::co_string, "title", "Optional workspace title", false));
-            bot_->global_command_create(createWorkspaceCommand);
+            commands.push_back(createWorkspaceCommand);
+        }
+
+        if (!commands.empty()) {
+            bot_->global_bulk_command_create(commands);
         }
     });
 
