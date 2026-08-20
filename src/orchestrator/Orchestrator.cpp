@@ -1485,8 +1485,8 @@ std::string Orchestrator::HandleSlashCommandCreateChat(const std::string& agents
         }
         return "Couldn't resolve these to known, active agents: " + joined;
     }
-    if (resolved.size() < 2) {
-        return "/create-chat needs 2 or more agents (space or comma separated names/ids).";
+    if (resolved.empty()) {
+        return "/create-chat needs at least 1 agent (space or comma separated names/ids).";
     }
 
     const int64_t now = static_cast<int64_t>(time(nullptr));

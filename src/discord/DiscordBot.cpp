@@ -96,9 +96,9 @@ void DiscordBot::Run() {
         }
         if (onSlashCommandCreateChat_) {
             dpp::slashcommand createChatCommand(
-                "create-chat", "Start a brand-new group chat with 2+ agents.", bot_->me.id);
+                "create-chat", "Start a brand-new chat with one or more agents.", bot_->me.id);
             createChatCommand.add_option(dpp::command_option(
-                dpp::co_string, "agents", "Space or comma separated agent names/ids (2 or more)", true));
+                dpp::co_string, "agents", "Space or comma separated agent names/ids (1 or more)", true));
             createChatCommand.add_option(
                 dpp::command_option(dpp::co_string, "title", "Optional chat title", false));
             commands.push_back(createChatCommand);
