@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <ctime>
 #include <iostream>
 #include <string>
@@ -92,6 +93,64 @@ void TestSchema() {
 
     Statement stmt(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='agents';");
     Check(stmt.Valid() && stmt.Step(), "Schema: agents table exists");
+}
+
+// Regression test for a real bug (see Schema.cpp's DELETE for the full
+// story): DiscordBot::HandleMessageCreate used to add every active agent
+// (plus a 'user' row) to whatever chat a human's Discord message landed in,
+// including chats — like DMs — that already had a deliberately curated
+// participant list. Confirms the one-time cleanup migration in
+// Schema::EnsureCreated strips exactly the bogus rows from a corrupted DM
+// chat, leaves that chat's own rightful agent alone, and doesn't touch a
+// non-DM chat's participants at all.
+void TestDmParticipantCleanupMigration() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+
+    Chat corruptedDm;
+    corruptedDm.id = "dm-tyrell-12345";
+    corruptedDm.createdBy = "user";
+    corruptedDm.status = "active";
+    corruptedDm.createdAt = 1;
+    chatStore.CreateChat(corruptedDm);
+    chatStore.AddParticipant("dm-tyrell-12345", "agent", "tyrell"); // rightful — must survive
+    chatStore.AddParticipant("dm-tyrell-12345", "agent", "alex");   // bogus — must be removed
+    chatStore.AddParticipant("dm-tyrell-12345", "agent", "wren");   // bogus — must be removed
+    chatStore.AddParticipant("dm-tyrell-12345", "user", "439463673333940225"); // bogus — must be removed
+
+    Chat groupChat;
+    groupChat.id = "chat-abc";
+    groupChat.createdBy = "user";
+    groupChat.status = "active";
+    groupChat.createdAt = 1;
+    chatStore.CreateChat(groupChat);
+    chatStore.AddParticipant("chat-abc", "agent", "alex");
+    chatStore.AddParticipant("chat-abc", "agent", "tyrell");
+    chatStore.AddParticipant("chat-abc", "user", "439463673333940225");
+
+    // Re-running EnsureCreated (already proven idempotent in TestSchema) is
+    // what applies the cleanup migration against these freshly-seeded rows.
+    Check(Schema::EnsureCreated(db), "Schema: EnsureCreated re-run applies the DM cleanup migration");
+
+    const std::vector<std::string> dmAgents = chatStore.ListParticipantAgentIds("dm-tyrell-12345");
+    Check(
+        dmAgents.size() == 1 && dmAgents[0] == "tyrell",
+        "Schema: DM cleanup strips every non-matching agent, keeps the rightful one");
+    Check(
+        !chatStore.IsParticipant("dm-tyrell-12345", "user", "439463673333940225"),
+        "Schema: DM cleanup strips the bogus 'user' participant row");
+
+    const std::vector<std::string> groupAgents = chatStore.ListParticipantAgentIds("chat-abc");
+    Check(
+        groupAgents.size() == 2 &&
+            std::find(groupAgents.begin(), groupAgents.end(), "alex") != groupAgents.end() &&
+            std::find(groupAgents.begin(), groupAgents.end(), "tyrell") != groupAgents.end(),
+        "Schema: DM cleanup leaves a non-DM chat's participants untouched");
+    Check(
+        chatStore.IsParticipant("chat-abc", "user", "439463673333940225"),
+        "Schema: DM cleanup leaves a non-DM chat's 'user' participant untouched");
 }
 
 void TestAgentStore() {
@@ -2951,6 +3010,7 @@ int main() {
 #define RUN(fn) RunTest(#fn, fn)
     RUN(TestGreeting);
     RUN(TestSchema);
+    RUN(TestDmParticipantCleanupMigration);
     RUN(TestAgentStore);
     RUN(TestAgentStoreBotToken);
     RUN(TestAgentSessionStore);

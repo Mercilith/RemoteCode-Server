@@ -231,6 +231,34 @@ bool Schema::EnsureCreated(Database& db) {
         return false;
     }
 
+    // One-time repair for a real bug (now fixed in DiscordBot::
+    // HandleMessageCreate): that handler used to add every active agent
+    // (plus a 'user' row) as a chat_participants row for whatever chat a
+    // human's message landed in, with no check for chats that already had
+    // a deliberately curated participant list — so simply typing into an
+    // agent's private DM channel silently added every OTHER active agent
+    // to that DM too. Orchestrator::HandleIncomingMessage's normal dispatch
+    // then correctly (per its own logic) queued and ran a real turn for
+    // every one of them on every message in that DM, each one showing a
+    // typing indicator and burning real API usage before coming back
+    // silent. This DELETE is idempotent (no-op once the bad rows are gone)
+    // and safe to run on every startup: a DM chat is always exactly one
+    // agent (see EnsureMentionedParticipantsJoined's early-return for
+    // "dm-" chat ids, and MessageUser's/HandleSlashCommandCreateDm's own
+    // single-AddParticipant-call construction), so anything in a "dm-%"
+    // chat that isn't that chat's own encoded agent id is unconditionally
+    // wrong and safe to remove.
+    if (!db.Exec(R"sql(
+DELETE FROM chat_participants
+WHERE chat_id LIKE 'dm-%'
+  AND NOT (
+    participant_type = 'agent'
+    AND (chat_id = 'dm-' || participant_id OR chat_id LIKE 'dm-' || participant_id || '-%')
+  );
+)sql")) {
+        return false;
+    }
+
     return true;
 }
 

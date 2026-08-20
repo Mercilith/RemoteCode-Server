@@ -182,19 +182,34 @@ void DiscordBot::HandleMessageCreate(const dpp::message_create_t& event) {
         }
     }
 
-    // No explicit invite/addressing mechanism exists yet, so "every active
-    // agent is a member of every channel-backed chat" is the whole
-    // membership rule for now — checked (cheaply; AddParticipant is
-    // INSERT OR IGNORE) on every incoming message, not just chat creation,
-    // so an agent activated after a chat already existed still joins it.
-    for (const Agent& agent : agentStore_.ListAll()) {
-        if (agent.status == "active") {
-            chatStore_.AddParticipant(chat.id, "agent", agent.id);
-        }
-    }
-
+    // "Every active agent is a member of every channel-backed chat" only
+    // applies to this handler's own generic 1:1 channel<->chat fallback
+    // (chat.id == channelId, no deliberate participant list was ever set
+    // up for it) — checked (cheaply; AddParticipant is INSERT OR IGNORE) on
+    // every incoming message, not just chat creation, so an agent activated
+    // after a chat already existed still joins it. Every OTHER chat kind
+    // (DM chats: "dm-...", workspaces, repo-onboarding, start_chat groups,
+    // ...) is created through its own dedicated flow with a specific,
+    // intentional participant list, resolved above via
+    // GetChatByDiscordChannel matching on discord_channel_id — this handler
+    // must never silently broaden that list just because a human typed into
+    // its channel. This used to run unconditionally, which meant typing
+    // into e.g. an agent's private DM channel added every other active
+    // agent as a real chat_participants row: HandleIncomingMessage's normal
+    // dispatch loop then correctly (per its own logic) queued and ran a
+    // real turn for every one of them on every message — burning real API
+    // usage for turns that just came back silent, and showing every
+    // agent's typing indicator in the process (see the DM-context-leak bug
+    // report this fixes).
     const std::string userId = std::to_string(event.msg.author.id);
-    chatStore_.AddParticipant(chat.id, "user", userId);
+    if (chat.id == channelId) {
+        for (const Agent& agent : agentStore_.ListAll()) {
+            if (agent.status == "active") {
+                chatStore_.AddParticipant(chat.id, "agent", agent.id);
+            }
+        }
+        chatStore_.AddParticipant(chat.id, "user", userId);
+    }
 
     Message message;
     message.chatId = chat.id;
