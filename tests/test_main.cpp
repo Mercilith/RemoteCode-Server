@@ -501,6 +501,93 @@ void TestMcpServer() {
     Check(malformed.contains("error") && malformed["error"]["code"] == -32700, "McpServer: malformed input is a parse error");
 }
 
+// Regression test for a real bug: post_message/read_chat used to accept any
+// caller-supplied chat_id with no check that the calling agent was actually
+// a participant of it — any agent could read or write into any other
+// agent's chat (DM or not) just by passing its chat_id, which is trivially
+// guessable for DMs ("dm-<agentId>"). Confirms an agent with no
+// chat_participants row in a target chat is rejected by both tools when it
+// passes that chat_id explicitly, and that the same agent's own chat (the
+// default, no explicit chat_id) still works normally.
+void TestChatParticipationEnforcement() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+
+    Chat ownChat;
+    ownChat.id = "dm-alex";
+    ownChat.createdBy = "user";
+    ownChat.status = "active";
+    ownChat.createdAt = 1;
+    chatStore.CreateChat(ownChat);
+    chatStore.AddParticipant("dm-alex", "agent", "alex");
+
+    Chat otherChat;
+    otherChat.id = "dm-tyrell";
+    otherChat.createdBy = "user";
+    otherChat.status = "active";
+    otherChat.createdAt = 1;
+    chatStore.CreateChat(otherChat);
+    chatStore.AddParticipant("dm-tyrell", "agent", "tyrell");
+    Message seeded;
+    seeded.chatId = "dm-tyrell";
+    seeded.senderType = "user";
+    seeded.senderId = "user";
+    seeded.type = "text";
+    seeded.content = "private to tyrell";
+    seeded.createdAt = 1;
+    chatStore.InsertMessage(seeded);
+
+    SeedTestAgent(agentStore, "alex", {"post_message", "read_chat"});
+
+    ActivityLog activityLog(L"test-logs", "test-mcp-participation");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
+        activityLog, "alex", "dm-alex");
+
+    const json readOther = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params", {{"name", "read_chat"}, {"arguments", {{"chat_id", "dm-tyrell"}}}}},
+    }.dump()));
+    Check(
+        readOther["result"]["isError"] == true,
+        "read_chat denies an agent with no chat_participants row in the target chat");
+    Check(
+        chatStore.RecentMessages("dm-tyrell", 10).size() == 1,
+        "read_chat did not leak dm-tyrell's message content");
+
+    const json postOther = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"chat_id", "dm-tyrell"}, {"content", "sneaking in"}}}}},
+    }.dump()));
+    Check(
+        postOther["result"]["isError"] == true,
+        "post_message denies an agent with no chat_participants row in the target chat");
+    Check(
+        chatStore.RecentMessages("dm-tyrell", 10).size() == 1,
+        "post_message did not actually write into dm-tyrell");
+
+    // Own chat, no explicit chat_id, still works.
+    const json postOwn = json::parse(server.HandleLine(json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"content", "hi from alex"}}}}},
+    }.dump()));
+    Check(postOwn["result"]["isError"] == false, "post_message still succeeds for the agent's own default chat");
+}
+
 void TestApprovalWorkflowTool() {
     Database db;
     db.Open(L":memory:");
@@ -2190,6 +2277,7 @@ int main() {
     RUN(TestChatStoreArchiving);
     RUN(TestChatStoreGetActiveDmChatForAgent);
     RUN(TestMcpServer);
+    RUN(TestChatParticipationEnforcement);
     RUN(TestApprovalWorkflowTool);
     RUN(TestMessageUserTool);
     RUN(TestUpdateAgentTool);

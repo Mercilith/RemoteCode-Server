@@ -25,14 +25,37 @@ std::string ResolveChatId(const ToolContext& ctx, const json& arguments) {
     return ctx.chatId;
 }
 
+// post_message/read_chat are the only two chat_id-taking tools that don't
+// already gate cross-chat targeting behind participation (start_chat,
+// request_add_agent_to_chat, and the workspace-join tool all check
+// IsParticipant/can_message before touching another chat) — an agent could
+// otherwise pass any chat_id it can guess or discover (e.g. "dm-<agentId>"
+// for any other agent, a well-established, easily-derived naming
+// convention in this codebase) and read or write into a chat it was never
+// added to, DM or not. Only gates an *explicit* chat_id argument — the
+// default (no chat_id, resolving to ctx.chatId) is left unchecked since
+// Orchestrator only ever dispatches a turn into a chat the agent is already
+// a participant of, so it's safe by construction and checking it anyway
+// would just be redundant (and require every existing test fixture that
+// constructs a scoped McpServer to also seed a matching chat_participants
+// row, for no real safety gain).
+bool CallerIsParticipant(ToolContext& ctx, const std::string& chatId) {
+    return ctx.chatStore.IsParticipant(chatId, "agent", ctx.agentId);
+}
+
 json PostMessage(ToolContext& ctx, const json& arguments, std::string& outError) {
     if (!arguments.contains("content")) {
         outError = "post_message requires 'content'";
         return {};
     }
+    const std::string chatId = ResolveChatId(ctx, arguments);
+    if (arguments.contains("chat_id") && !CallerIsParticipant(ctx, chatId)) {
+        outError = "post_message: you are not a participant of that chat";
+        return {};
+    }
 
     Message message;
-    message.chatId = ResolveChatId(ctx, arguments);
+    message.chatId = chatId;
     message.senderType = "agent";
     message.senderId = ctx.agentId;
     message.type = "text";
@@ -105,6 +128,10 @@ json ReadChat(ToolContext& ctx, const json& arguments, std::string& outError) {
     const std::string chatId = ResolveChatId(ctx, arguments);
     if (chatId.empty()) {
         outError = "read_chat requires 'chat_id' (no current chat to default to)";
+        return {};
+    }
+    if (arguments.contains("chat_id") && !CallerIsParticipant(ctx, chatId)) {
+        outError = "read_chat: you are not a participant of that chat";
         return {};
     }
     const int limit = arguments.value("limit", 50);
