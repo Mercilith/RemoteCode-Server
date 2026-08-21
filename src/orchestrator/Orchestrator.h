@@ -294,6 +294,20 @@ private:
     // a dm- chat, or the Discord API call failed).
     std::string EnsureChannelForChat(const Chat& chat);
 
+    // Returns the (lazily created, then cached in schema_meta under
+    // "agent_chats_category_id") Discord category new agent-initiated chat
+    // channels get parented under — see EnsureChannelForChat's use of this.
+    // Discord's bot API has no way to mute a channel on a human's behalf
+    // (per-channel notification prefs are the human's own client-side
+    // setting, not something a bot token can touch); what a bot *can* do is
+    // create channels inside a category, and Discord's own client already
+    // cascades a category's mute state to any channel created inside it
+    // afterward. So this exists purely to give Cardon one thing to mute
+    // once (right-click the category -> Mute Category) and have every
+    // future agent-to-agent chat inherit silence automatically, without
+    // needing to mute each new channel by hand.
+    std::string EnsureAgentChatsCategory();
+
     LogFn log_;
     std::wstring dbPath_;
     std::wstring logDir_;

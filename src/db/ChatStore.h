@@ -158,6 +158,16 @@ public:
     // should fall back to the global default.
     bool GetTurnLimit(const std::string& chatId, int& outTurnLimit);
 
+    // Generic key/value accessor for the schema_meta table (see Schema.cpp
+    // — originally added for the DM-participant-cleanup migration marker,
+    // now also home for small one-off persisted values like Orchestrator's
+    // cached "agent-initiated chats" Discord category id). Not chat-specific
+    // itself; lives here rather than a dedicated store class since it's the
+    // only thing in this codebase that already owns a Database& without
+    // being tied to one particular table's concerns.
+    bool GetSchemaMetaValue(const std::string& key, std::string& outValue);
+    bool SetSchemaMetaValue(const std::string& key, const std::string& value);
+
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
         std::string& outWebhookToken);

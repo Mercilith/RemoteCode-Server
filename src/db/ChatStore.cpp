@@ -520,6 +520,31 @@ bool ChatStore::GetTurnLimit(const std::string& chatId, int& outTurnLimit) {
     return true;
 }
 
+bool ChatStore::GetSchemaMetaValue(const std::string& key, std::string& outValue) {
+    Statement stmt(db_, "SELECT value FROM schema_meta WHERE key = ?1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, key);
+    if (!stmt.Step()) {
+        return false;
+    }
+    outValue = stmt.ColumnText(0);
+    return true;
+}
+
+bool ChatStore::SetSchemaMetaValue(const std::string& key, const std::string& value) {
+    Statement stmt(db_, "INSERT INTO schema_meta (key, value) VALUES (?1, ?2) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, key);
+    stmt.BindText(2, value);
+    stmt.Step();
+    return stmt.Ok();
+}
+
 bool ChatStore::GetWebhook(
     const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
     std::string& outWebhookToken) {

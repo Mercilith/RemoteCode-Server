@@ -520,6 +520,23 @@ void TestChatStore() {
     Check(
         !store.GetTurnLimit("chat-2", turnLimit),
         "ChatStore: a different chat with no override set still returns false");
+
+    std::string metaValue;
+    Check(
+        !store.GetSchemaMetaValue("agent_chats_category_id", metaValue),
+        "ChatStore: GetSchemaMetaValue returns false for a key that was never set");
+    Check(
+        store.SetSchemaMetaValue("agent_chats_category_id", "111"),
+        "ChatStore: SetSchemaMetaValue succeeds");
+    Check(
+        store.GetSchemaMetaValue("agent_chats_category_id", metaValue) && metaValue == "111",
+        "ChatStore: GetSchemaMetaValue round-trips the value just set");
+    Check(
+        store.SetSchemaMetaValue("agent_chats_category_id", "222"),
+        "ChatStore: SetSchemaMetaValue on an existing key succeeds (upsert)");
+    Check(
+        store.GetSchemaMetaValue("agent_chats_category_id", metaValue) && metaValue == "222",
+        "ChatStore: a second SetSchemaMetaValue call replaces the previous value, not duplicates it");
 }
 
 void TestMcpServer() {

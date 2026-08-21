@@ -12,6 +12,7 @@
 #include <deque>
 #include <filesystem>
 #include <thread>
+#include <unordered_set>
 
 #include "../config/Secrets.h"
 #include "../config/ServerConfig.h"
@@ -815,10 +816,26 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         queue.push_back({id, tagged});
     };
 
+    // A turn below may post into some OTHER chat entirely — most notably
+    // start_chat, which creates a brand-new chat (and an opening message in
+    // it) from inside a turn that's actually running in a different chat
+    // (e.g. an agent's own DM). Dispatch below is otherwise scoped to
+    // `chatId` (this call's own chat) via the mirror loop's `produced.chatId
+    // != chatId` check, so without this, a chat an agent just created for a
+    // teammate would sit there forever with only the opening message in it
+    // — nobody ever triggers that teammate's first turn, since nothing
+    // "typed into Discord" to fire the usual onIncomingMessage_ path. DM
+    // chats are excluded (single participant, nothing to dispatch to).
+    // Collected here and dispatched once per chat (not once per message)
+    // after the whole queue below has been drained.
+    std::unordered_set<std::string> foreignChatsToDispatch;
+
     std::string triggeringContent;
+    std::string triggeringSenderId;
     const std::vector<Message> latest = chatStore_->RecentMessages(chatId, 1);
     if (!latest.empty()) {
         triggeringContent = latest.back().content;
+        triggeringSenderId = latest.back().senderId;
     }
     // Pulls in anyone @tagged in the triggering message who isn't already a
     // participant — covers both a human typing "@newAgent" in Discord and
@@ -826,6 +843,16 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
     EnsureMentionedParticipantsJoined(chatId, triggeringContent, participantIds, participants, participantModes);
     const std::vector<std::string> taggedInTrigger = Mentions::ParseMentions(triggeringContent, participants);
     for (const std::string& id : participantIds) {
+        if (id == triggeringSenderId) {
+            // Never self-trigger: the only way an agent ends up as the
+            // triggering message's own sender is the foreignChatsToDispatch
+            // path below (a brand-new chat whose only message so far is the
+            // creating agent's own opener) — a human's senderId never
+            // matches an agentId, so this doesn't change human-triggered
+            // dispatch at all. Mirrors the mirror loop's own `otherId ==
+            // produced.senderId` self-exclusion a bit further down.
+            continue;
+        }
         const bool tagged = std::find(taggedInTrigger.begin(), taggedInTrigger.end(), id) != taggedInTrigger.end();
         enqueue(id, tagged);
     }
@@ -1038,8 +1065,14 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             // broadcast to. A message posted into some other, unrelated
             // chat (e.g. an explicit post_message chat_id, or a fresh
             // start_chat) isn't this chat's concern either — participants/
-            // participantIds below are scoped to `chatId`, not that chat.
-            if (produced.chatId.rfind("dm-", 0) == 0 || produced.chatId != chatId) {
+            // participantIds below are scoped to `chatId`, not that chat;
+            // it gets its own dispatch pass below instead (see
+            // foreignChatsToDispatch above).
+            if (produced.chatId.rfind("dm-", 0) == 0) {
+                continue;
+            }
+            if (produced.chatId != chatId) {
+                foreignChatsToDispatch.insert(produced.chatId);
                 continue;
             }
 
@@ -1062,6 +1095,15 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
                 enqueue(otherId, taggedHere);
             }
         }
+    }
+
+    // Dispatch each newly-touched foreign chat (see foreignChatsToDispatch's
+    // declaration above) on its own detached thread — same pattern
+    // SetIncomingMessageHandler already uses for a real incoming Discord
+    // message, and safe to run concurrently with anything else since
+    // HandleIncomingMessage serializes per-chat via chatDispatchMutexes_.
+    for (const std::string& foreignChatId : foreignChatsToDispatch) {
+        std::thread([this, foreignChatId]() { HandleIncomingMessage(foreignChatId); }).detach();
     }
 
     // A turn above may have called submit_agent_for_approval, which only
@@ -1179,6 +1221,27 @@ void Orchestrator::HandleTurnLimitContinue(const std::string& chatId) {
     HandleIncomingMessage(chatId);
 }
 
+std::string Orchestrator::EnsureAgentChatsCategory() {
+    std::string categoryId;
+    if (chatStore_->GetSchemaMetaValue("agent_chats_category_id", categoryId) && !categoryId.empty()) {
+        return categoryId;
+    }
+    if (discordGuildId_.empty() || discordOwnerUserId_.empty()) {
+        return "";
+    }
+    // No extraBotUserIds here — this category, unlike a workspace's, isn't
+    // scoped to any one agent, and every channel created inside it still
+    // gets its own explicit per-channel overwrites via CreateDmChannel
+    // (which is what actually grants access; the category's own overwrites
+    // only matter as a fallback for a channel with none of its own).
+    categoryId = discordBot_->CreateCategory(discordGuildId_, "Agent Chats", discordOwnerUserId_, {});
+    if (categoryId.empty()) {
+        return "";
+    }
+    chatStore_->SetSchemaMetaValue("agent_chats_category_id", categoryId);
+    return categoryId;
+}
+
 std::string Orchestrator::EnsureChannelForChat(const Chat& chat) {
     if (!chat.discordChannelId.empty()) {
         return chat.discordChannelId;
@@ -1224,8 +1287,18 @@ std::string Orchestrator::EnsureChannelForChat(const Chat& chat) {
         channelName = chat.title.empty() ? chat.id : Slugify(chat.title);
     }
 
-    const std::string channelId =
-        discordBot_->CreateDmChannel(discordGuildId_, channelName, discordOwnerUserId_, extraBotUserIds);
+    // A chat an agent created on its own initiative (start_chat, not a
+    // human-run /create-chat) — most commonly one agent looping in another
+    // to hash something out — is exactly the kind of channel Cardon doesn't
+    // want a notification for every time it gets a new message. DM chats
+    // (agent <-> Cardon) are excluded: those are always meant for him.
+    // "system" (repo-onboarding's own chat) is excluded too — left in the
+    // default, unmuted spot pending an explicit decision either way.
+    const bool isAgentInitiated = !isDm && chat.createdBy != "user" && chat.createdBy != "system";
+    const std::string parentCategoryId = isAgentInitiated ? EnsureAgentChatsCategory() : "";
+
+    const std::string channelId = discordBot_->CreateDmChannel(
+        discordGuildId_, channelName, discordOwnerUserId_, extraBotUserIds, parentCategoryId);
     if (channelId.empty()) {
         log_(L"Orchestrator: failed to create a private Discord channel for chat '" + AsciiToWide(chat.id) + L"'.");
         return "";
