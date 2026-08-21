@@ -38,6 +38,15 @@ using DiscordReactionHandler =
 using SlashCommandAddRepoHandler =
     std::function<void(const std::string& url, const std::string& notes)>;
 
+// A file to upload alongside a message (see Tools.cpp's post_message/
+// message_user "attachments" argument, mirrored to Discord by Orchestrator).
+// `content` is the literal file bytes/text, not base64 — dpp::message::add_file
+// takes the raw content directly.
+struct DiscordAttachment {
+    std::string filename;
+    std::string content;
+};
+
 // create-chat/add-agent/remove-agent are pure bookkeeping (DB writes plus at
 // most one Discord REST call — channel create or a permission-overwrite
 // edit), never an agent turn, so unlike add-repo's "ack now, do the slow
@@ -136,10 +145,13 @@ public:
     // Posts `content` into `channelId` under `agentName`'s identity via a
     // per-(channel, agent) webhook, creating and caching the webhook on
     // first use. Returns the posted Discord message id, or an empty string
-    // on any REST failure.
+    // on any REST failure. `attachments` (if any) are uploaded on the first
+    // chunk only — content over Discord's ~2000-char limit still splits into
+    // multiple messages (see ChunkForDiscord), but the files logically
+    // belong to the message as a whole, not to any one chunk.
     std::string PostAsAgent(
         const std::string& channelId, const std::string& agentId, const std::string& agentName,
-        const std::string& content);
+        const std::string& content, const std::vector<DiscordAttachment>& attachments = {});
 
     // Posts `content` as the bot's own identity (not a webhook) — used for
     // system-level messages (e.g. approval outcomes) that no single agent

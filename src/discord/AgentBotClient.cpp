@@ -40,18 +40,28 @@ void AgentBotClient::TriggerTyping(const std::string& channelId) {
     bot_->channel_typing(std::stoull(channelId));
 }
 
-std::string AgentBotClient::PostAsSelf(const std::string& channelId, const std::string& content) {
+std::string AgentBotClient::PostAsSelf(
+    const std::string& channelId, const std::string& content,
+    const std::vector<DiscordAttachment>& attachments) {
     // See DiscordBot::PostAsAgent's identical comment — Discord rejects a
     // single message over ~2000 chars outright, found via a real agent
     // report silently vanishing (stored in the DB, never posted, no error
     // surfaced). Post every chunk; the first chunk's id is what's tracked.
+    bool firstChunk = true;
     std::string firstMessageId;
     for (const std::string& chunk : ChunkForDiscord(content)) {
+        dpp::message msg(std::stoull(channelId), chunk);
+        if (firstChunk) {
+            for (const DiscordAttachment& attachment : attachments) {
+                msg.add_file(attachment.filename, attachment.content);
+            }
+        }
+        firstChunk = false;
+
         std::promise<dpp::confirmation_callback_t> promise;
         std::future<dpp::confirmation_callback_t> future = promise.get_future();
         bot_->message_create(
-            dpp::message(std::stoull(channelId), chunk),
-            [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+            msg, [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
         const dpp::confirmation_callback_t result = future.get();
         if (result.is_error()) {
             continue; // best-effort — a later chunk failing shouldn't lose earlier ones

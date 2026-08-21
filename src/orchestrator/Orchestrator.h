@@ -261,7 +261,9 @@ private:
     // (HandleIncomingMessage) and draft-posting (PostPendingApprovals)
     // funnel through, so they stay consistent as own-bot support was added
     // after both already existed.
-    std::string PostAsAgent(const Agent& agent, const std::string& channelId, const std::string& content);
+    std::string PostAsAgent(
+        const Agent& agent, const std::string& channelId, const std::string& content,
+        const std::vector<DiscordAttachment>& attachments = {});
     // Lazily builds (and caches for the process lifetime) the REST-only
     // bot client for an agent's own token; rebuilt if the stored encrypted
     // token changes (e.g. reassigned via the admin API). Returns nullptr

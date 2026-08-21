@@ -389,7 +389,7 @@ bool DiscordBot::EnsureWebhook(
 
 std::string DiscordBot::PostAsAgent(
     const std::string& channelId, const std::string& agentId, const std::string& agentName,
-    const std::string& content) {
+    const std::string& content, const std::vector<DiscordAttachment>& attachments) {
     std::string webhookId, webhookToken;
     if (!EnsureWebhook(channelId, agentId, agentName, webhookId, webhookToken) || !bot_) {
         return "";
@@ -404,10 +404,17 @@ std::string DiscordBot::PostAsAgent(
     // appeared in Discord, with no error surfaced anywhere). Post every
     // chunk; the first chunk's message id is what gets tracked as "this
     // message's" Discord id.
+    bool firstChunk = true;
     std::string firstMessageId;
     for (const std::string& chunk : ChunkForDiscord(content)) {
         dpp::message msg;
         msg.content = chunk;
+        if (firstChunk) {
+            for (const DiscordAttachment& attachment : attachments) {
+                msg.add_file(attachment.filename, attachment.content);
+            }
+        }
+        firstChunk = false;
 
         std::promise<dpp::confirmation_callback_t> promise;
         std::future<dpp::confirmation_callback_t> future = promise.get_future();

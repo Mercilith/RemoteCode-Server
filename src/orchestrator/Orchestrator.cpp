@@ -36,6 +36,36 @@ std::wstring AsciiToWide(const std::string& s) {
     return std::wstring(s.begin(), s.end());
 }
 
+// Reverses Tools.cpp's ParseAttachmentsMetadata — the messages table just
+// stores whatever a post_message/message_user tool call wrote into
+// Message::metadataJson (a raw JSON blob, no attachment-specific column),
+// so this is where it's read back on the way to a real Discord upload.
+// Empty/malformed metadata is simply "no attachments," not an error — most
+// messages have no metadata at all.
+std::vector<DiscordAttachment> ParseAttachmentsFromMetadata(const std::string& metadataJson) {
+    std::vector<DiscordAttachment> attachments;
+    if (metadataJson.empty()) {
+        return attachments;
+    }
+    json parsed;
+    try {
+        parsed = json::parse(metadataJson);
+    } catch (const json::exception&) {
+        return attachments;
+    }
+    if (!parsed.is_object() || !parsed.contains("attachments") || !parsed["attachments"].is_array()) {
+        return attachments;
+    }
+    for (const json& item : parsed["attachments"]) {
+        if (item.is_object() && item.contains("filename") && item.contains("content") &&
+            item["filename"].is_string() && item["content"].is_string()) {
+            attachments.push_back(
+                DiscordAttachment{item["filename"].get<std::string>(), item["content"].get<std::string>()});
+        }
+    }
+    return attachments;
+}
+
 // Real UTF-8 conversion (unlike AsciiToWide above) — needed for
 // RepoLocalPath, which is built from %ProgramData% (via
 // SHGetKnownFolderPath) and can in principle contain non-ASCII characters on
@@ -997,7 +1027,8 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
 
             if (!discordChannelId.empty() && produced.discordMessageId.empty()) {
                 const std::string discordText = Mentions::ReflectMentionsForDiscord(produced.content, participants);
-                const std::string discordMessageId = PostAsAgent(agent, discordChannelId, discordText);
+                const std::vector<DiscordAttachment> attachments = ParseAttachmentsFromMetadata(produced.metadataJson);
+                const std::string discordMessageId = PostAsAgent(agent, discordChannelId, discordText, attachments);
                 if (!discordMessageId.empty()) {
                     chatStore_->SetMessageDiscordId(produced.id, discordMessageId);
                 }
@@ -1459,11 +1490,13 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
     }
 }
 
-std::string Orchestrator::PostAsAgent(const Agent& agent, const std::string& channelId, const std::string& content) {
+std::string Orchestrator::PostAsAgent(
+    const Agent& agent, const std::string& channelId, const std::string& content,
+    const std::vector<DiscordAttachment>& attachments) {
     if (AgentBotClient* ownBot = GetOrCreateAgentBotClient(agent)) {
-        return ownBot->PostAsSelf(channelId, content);
+        return ownBot->PostAsSelf(channelId, content, attachments);
     }
-    return discordBot_->PostAsAgent(channelId, agent.id, agent.name, content);
+    return discordBot_->PostAsAgent(channelId, agent.id, agent.name, content, attachments);
 }
 
 std::thread Orchestrator::StartTypingIndicator(

@@ -66,6 +66,73 @@ bool CallerIsParticipant(ToolContext& ctx, const std::string& chatId) {
     return ctx.chatStore.IsParticipant(chatId, "agent", ctx.agentId);
 }
 
+// Discord itself caps a message at 10 file attachments; the per-file/total
+// byte caps here are our own, chosen well under Discord's ~25MB bot upload
+// limit so a runaway "attach the whole log" call can't bloat the messages
+// table's metadata TEXT column or blow up the eventual multipart upload.
+constexpr size_t kMaxAttachmentsPerMessage = 10;
+constexpr size_t kMaxAttachmentBytes = 8 * 1000 * 1000;
+constexpr size_t kMaxTotalAttachmentBytes = 8 * 1000 * 1000;
+
+// Shared by post_message/message_user: pulls an optional "attachments"
+// array (each {filename, content} — content is the literal file text, not
+// base64; every real use case so far is a text/markdown write-up, and
+// requiring the model to base64-encode its own output for no reason would
+// just be extra opportunities to get it wrong) out of `arguments` and
+// returns it pre-serialized as the JSON that goes straight into
+// Message::metadataJson. Returns "" (with outError untouched) when there's
+// no "attachments" key at all — that's the common case, not an error.
+std::string ParseAttachmentsMetadata(const json& arguments, std::string& outError) {
+    if (!arguments.contains("attachments")) {
+        return "";
+    }
+    const json& attachments = arguments["attachments"];
+    if (!attachments.is_array()) {
+        outError = "attachments must be an array";
+        return "";
+    }
+    if (attachments.empty()) {
+        return "";
+    }
+    if (attachments.size() > kMaxAttachmentsPerMessage) {
+        outError = "attachments: at most " + std::to_string(kMaxAttachmentsPerMessage) + " files per message";
+        return "";
+    }
+
+    json outAttachments = json::array();
+    size_t totalBytes = 0;
+    for (const json& item : attachments) {
+        if (!item.is_object() || !item.contains("filename") || !item.contains("content") ||
+            !item["filename"].is_string() || !item["content"].is_string()) {
+            outError = "each attachment needs a string 'filename' and string 'content'";
+            return "";
+        }
+        const std::string filename = item["filename"].get<std::string>();
+        const std::string content = item["content"].get<std::string>();
+        if (filename.empty() || filename.size() > 256) {
+            outError = "attachment filename must be 1-256 characters";
+            return "";
+        }
+        if (filename.find('/') != std::string::npos || filename.find('\\') != std::string::npos) {
+            outError = "attachment filename must not contain path separators";
+            return "";
+        }
+        if (content.size() > kMaxAttachmentBytes) {
+            outError = "attachment '" + filename + "' exceeds the " +
+                std::to_string(kMaxAttachmentBytes / 1000 / 1000) + "MB per-file limit";
+            return "";
+        }
+        totalBytes += content.size();
+        if (totalBytes > kMaxTotalAttachmentBytes) {
+            outError = "attachments: total size exceeds the " +
+                std::to_string(kMaxTotalAttachmentBytes / 1000 / 1000) + "MB per-message limit";
+            return "";
+        }
+        outAttachments.push_back(json{{"filename", filename}, {"content", content}});
+    }
+    return json{{"attachments", outAttachments}}.dump();
+}
+
 json PostMessage(ToolContext& ctx, const json& arguments, std::string& outError) {
     if (!arguments.contains("content")) {
         outError = "post_message requires 'content'";
@@ -77,18 +144,23 @@ json PostMessage(ToolContext& ctx, const json& arguments, std::string& outError)
         return {};
     }
 
+    const std::string attachmentsMetadata = ParseAttachmentsMetadata(arguments, outError);
+    if (!outError.empty()) {
+        return {};
+    }
+
     Message message;
     message.chatId = chatId;
     message.senderType = "agent";
     message.senderId = ctx.agentId;
     message.type = "text";
     message.content = arguments["content"].get<std::string>();
+    message.metadataJson = attachmentsMetadata;
     message.createdAt = static_cast<int64_t>(time(nullptr));
 
-    // DB-only: this pass does not push tool-initiated posts to Discord —
-    // only the primary turn reply (written by Orchestrator after the
-    // worker returns) does. A future pass can have Orchestrator relay
-    // newly inserted agent-authored messages via DiscordBot::PostAsAgent.
+    // DB-only: Orchestrator relays this (content, and any attachments) to
+    // Discord after the turn finishes — see the MessagesBySenderAfter loop
+    // in Orchestrator::HandleIncomingMessage.
     const int64_t id = ctx.chatStore.InsertMessage(message);
     if (id < 0) {
         outError = "failed to insert message";
@@ -131,12 +203,18 @@ json MessageUser(ToolContext& ctx, const json& arguments, std::string& outError)
     }
     const std::string& dmChatId = dmChat.id;
 
+    const std::string attachmentsMetadata = ParseAttachmentsMetadata(arguments, outError);
+    if (!outError.empty()) {
+        return {};
+    }
+
     Message message;
     message.chatId = dmChatId;
     message.senderType = "agent";
     message.senderId = ctx.agentId;
     message.type = "text";
     message.content = arguments["content"].get<std::string>();
+    message.metadataJson = attachmentsMetadata;
     message.createdAt = static_cast<int64_t>(time(nullptr));
 
     const int64_t id = ctx.chatStore.InsertMessage(message);
@@ -1569,7 +1647,9 @@ json Tools::Definitions() {
              "into a different chat. To bring another agent into the conversation, tag them by id "
              "(e.g. \"@alex\") anywhere in content — only agents you tag get a follow-up turn, and "
              "only if your can_message permits messaging them; posting with no tags does not "
-             "trigger anyone else."},
+             "trigger anyone else. Pass attachments to also send one or more files (e.g. a write-up "
+             "as a .md file) alongside the message — each is {filename, content}, with content as "
+             "the literal file text (not base64). Up to 10 files, 8MB per file."},
             {"inputSchema",
              {
                  {"type", "object"},
@@ -1577,6 +1657,20 @@ json Tools::Definitions() {
                   {
                       {"chat_id", {{"type", "string"}}},
                       {"content", {{"type", "string"}}},
+                      {"attachments",
+                       {
+                           {"type", "array"},
+                           {"items",
+                            {
+                                {"type", "object"},
+                                {"properties",
+                                 {
+                                     {"filename", {{"type", "string"}}},
+                                     {"content", {{"type", "string"}}},
+                                 }},
+                                {"required", json::array({"filename", "content"})},
+                            }},
+                       }},
                   }},
                  {"required", json::array({"content"})},
              }},
@@ -1602,11 +1696,31 @@ json Tools::Definitions() {
              "Send Cardon something privately — a status update, an escalation, an answer meant just "
              "for him — instead of posting it in whatever group chat this turn is running in. Always "
              "goes to your own private DM channel with him, created automatically the first time you "
-             "use this. Use post_message for anything meant for the group instead."},
+             "use this. Use post_message for anything meant for the group instead. Pass attachments "
+             "to also send one or more files (e.g. a write-up as a .md file) — each is {filename, "
+             "content}, with content as the literal file text (not base64). Up to 10 files, 8MB per "
+             "file."},
             {"inputSchema",
              {
                  {"type", "object"},
-                 {"properties", {{"content", {{"type", "string"}}}}},
+                 {"properties",
+                  {
+                      {"content", {{"type", "string"}}},
+                      {"attachments",
+                       {
+                           {"type", "array"},
+                           {"items",
+                            {
+                                {"type", "object"},
+                                {"properties",
+                                 {
+                                     {"filename", {{"type", "string"}}},
+                                     {"content", {{"type", "string"}}},
+                                 }},
+                                {"required", json::array({"filename", "content"})},
+                            }},
+                       }},
+                  }},
                  {"required", json::array({"content"})},
              }},
         },

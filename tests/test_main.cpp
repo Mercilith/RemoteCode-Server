@@ -828,6 +828,91 @@ void TestMessageUserTool() {
         "a second message_user call reuses the existing dm chat (get-or-create is idempotent)");
 }
 
+void TestPostMessageAttachments() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    ChatStore chatStore(db);
+    AgentStore agentStore(db);
+    ApprovalStore approvalStore(db);
+    PromptTemplateStore promptTemplateStore(db);
+    RepoStore repoStore(db);
+    WorkspaceStore workspaceStore(db);
+    TempPermissionStore tempPermissionStore(db);
+    TaskStore taskStore(db);
+    ReminderStore reminderStore(db);
+
+    Chat chat;
+    chat.id = "chat-1";
+    chat.createdBy = "user";
+    chat.status = "active";
+    chat.discordChannelId = "1";
+    chat.createdAt = 1;
+    chatStore.CreateChat(chat);
+    SeedTestAgent(agentStore, "tyrell", {"post_message"});
+
+    ActivityLog activityLog(L"test-logs", "test-attachments");
+    McpServer server(
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        "tyrell", "chat-1");
+
+    // A valid attachment round-trips into the stored message's metadata.
+    const std::string goodCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 1},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "post_message"},
+          {"arguments",
+           {{"content", "here's the write-up"},
+            {"attachments", json::array({{{"filename", "writeup.md"}, {"content", "# Title\nBody"}}})}}}}},
+    }.dump();
+    const json goodResponse = json::parse(server.HandleLine(goodCall));
+    Check(goodResponse["result"]["isError"] == false, "post_message with a valid attachment succeeds");
+
+    const std::vector<Message> stored = chatStore.RecentMessages("chat-1", 10);
+    Check(stored.size() == 1, "post_message with attachments still writes exactly one message");
+    const json metadata = json::parse(stored[0].metadataJson);
+    Check(
+        metadata["attachments"].size() == 1 && metadata["attachments"][0]["filename"] == "writeup.md" &&
+            metadata["attachments"][0]["content"] == "# Title\nBody",
+        "the attachment's filename/content round-trip through Message::metadataJson");
+
+    // A path separator in the filename is rejected outright — that field
+    // becomes the literal filename dpp::message::add_file uploads under.
+    const std::string badFilenameCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 2},
+        {"method", "tools/call"},
+        {"params",
+         {{"name", "post_message"},
+          {"arguments",
+           {{"content", "bad"},
+            {"attachments", json::array({{{"filename", "../escape.md"}, {"content", "x"}}})}}}}},
+    }.dump();
+    const json badFilenameResponse = json::parse(server.HandleLine(badFilenameCall));
+    Check(
+        badFilenameResponse["result"]["isError"] == true,
+        "post_message rejects an attachment filename containing a path separator");
+    Check(
+        chatStore.RecentMessages("chat-1", 10).size() == 1,
+        "the rejected-filename call did not write a second message");
+
+    // More than the 10-file-per-message cap is rejected.
+    json manyAttachments = json::array();
+    for (int i = 0; i < 11; ++i) {
+        manyAttachments.push_back(json{{"filename", "f" + std::to_string(i) + ".txt"}, {"content", "x"}});
+    }
+    const std::string tooManyCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 3},
+        {"method", "tools/call"},
+        {"params", {{"name", "post_message"}, {"arguments", {{"content", "too many"}, {"attachments", manyAttachments}}}}},
+    }.dump();
+    const json tooManyResponse = json::parse(server.HandleLine(tooManyCall));
+    Check(tooManyResponse["result"]["isError"] == true, "post_message rejects more than 10 attachments");
+}
+
 // Regression test for a real bug: once an agent's entire DM history ends up
 // archived (e.g. via /close-chat, with no active DM left to detect), both
 // message_user's get-or-create and /create-dm used to unconditionally
@@ -3402,6 +3487,7 @@ int main() {
     RUN(TestChatParticipationEnforcement);
     RUN(TestApprovalWorkflowTool);
     RUN(TestMessageUserTool);
+    RUN(TestPostMessageAttachments);
     RUN(TestMessageUserToolPicksFreshIdWhenBareOneIsArchived);
     RUN(TestUpdateAgentTool);
     RUN(TestToolPermissionEnforcement);

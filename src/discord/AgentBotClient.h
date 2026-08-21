@@ -3,6 +3,9 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
+
+#include "DiscordBot.h" // DiscordAttachment
 
 namespace dpp {
 class cluster;
@@ -30,8 +33,12 @@ public:
     bool FetchSelf(std::string& outUserId, std::string& outUsername);
 
     // Posts `content` into `channelId` as this bot. Returns the posted
-    // message id, or an empty string on any REST failure.
-    std::string PostAsSelf(const std::string& channelId, const std::string& content);
+    // message id, or an empty string on any REST failure. `attachments`
+    // (if any) are uploaded on the first chunk only — see
+    // DiscordBot::PostAsAgent's identical comment.
+    std::string PostAsSelf(
+        const std::string& channelId, const std::string& content,
+        const std::vector<DiscordAttachment>& attachments = {});
 
     // Fires the "X is typing..." indicator in `channelId` as this bot.
     // Fire-and-forget (dpp's default callback just logs on error) — Discord
