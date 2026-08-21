@@ -894,22 +894,47 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
         }
         activityLog_->Log(chatId, agent.id, "turn_end", json{{"ok", true}, {"replied", true}});
 
-        Message reply;
-        reply.chatId = chatId;
-        reply.senderType = "agent";
-        reply.senderId = agent.id;
-        reply.type = "text";
-        reply.content = turnResult.response;
-        reply.createdAt = static_cast<int64_t>(time(nullptr));
-        chatStore_->InsertMessage(reply);
+        // turnResult.response is the SDK's own final wrap-up text for the
+        // turn — produced unconditionally whether or not the agent already
+        // called post_message mid-turn to say its actual piece. Auto-posting
+        // it as a second chat message on top of that produced exactly the
+        // duplicate-message bug reported live: an agent would post_message
+        // its real content, then this final text ("Posted my input to the
+        // group. Summary of what I told Tyrell: ...") landed right after it
+        // as a redundant recap, every single turn. If this turn already put
+        // at least one message into this same chat via a tool call, the
+        // model already communicated — treat the trailing wrap-up text as
+        // just that, not a second real reply, and don't insert it. Only
+        // auto-post it for the (still common) case where post_message was
+        // never called and the model's own response text IS the reply.
+        const bool alreadyPostedInThisChat = [&]() {
+            for (const Message& produced : chatStore_->MessagesBySenderAfter(agent.id, maxIdBeforeTurn)) {
+                if (produced.chatId == chatId) {
+                    return true;
+                }
+            }
+            return false;
+        }();
+
+        if (!alreadyPostedInThisChat) {
+            Message reply;
+            reply.chatId = chatId;
+            reply.senderType = "agent";
+            reply.senderId = agent.id;
+            reply.type = "text";
+            reply.content = turnResult.response;
+            reply.createdAt = static_cast<int64_t>(time(nullptr));
+            chatStore_->InsertMessage(reply);
+        }
 
         // Everything this turn produced, in ANY chat — the primary reply
-        // just inserted above, plus any post_message calls the MCP
-        // subprocess made mid-turn (it only ever writes to the DB; it has
-        // no live Discord connection of its own), plus any message_user
-        // calls (which write into this agent's own separate DM chat) —
-        // gets mirrored to Discord and broadcast to the rest of this chat
-        // here, on the orchestrator's own thread, in one place.
+        // just inserted above (if it was — see alreadyPostedInThisChat),
+        // plus any post_message calls the MCP subprocess made mid-turn (it
+        // only ever writes to the DB; it has no live Discord connection of
+        // its own), plus any message_user calls (which write into this
+        // agent's own separate DM chat) — gets mirrored to Discord and
+        // broadcast to the rest of this chat here, on the orchestrator's
+        // own thread, in one place.
         for (const Message& produced : chatStore_->MessagesBySenderAfter(agent.id, maxIdBeforeTurn)) {
             // approval_request messages are posted separately by
             // PostPendingApprovals (with the approve/reject reactions
