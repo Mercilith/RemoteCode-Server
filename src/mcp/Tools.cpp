@@ -1631,9 +1631,19 @@ json RequestNewTool(ToolContext& ctx, const json& arguments, std::string& outErr
 // it indefinitely since create_agent's tool_permissions defaults are set at
 // creation time and can silently miss tools like this one that only matter
 // once an agent starts actually participating in multi-agent conversations.
+//
+// message_user is the same story, confirmed live: Tyrell tried to report
+// straight back to Cardon and got silently blocked because message_user
+// wasn't in his tool_permissions from creation time, leaving him stuck with
+// a finished result and no way to deliver it. It's the one channel every
+// agent needs regardless of role (there's no legitimate reason an agent
+// should be UNABLE to reach Cardon directly), so it belongs alongside
+// list_my_chats/read_chat here rather than depending on each agent's
+// tool_permissions happening to include it.
 bool IsAlwaysAllowedTool(const std::string& toolName) {
     return toolName == "remember" || toolName == "request_temporary_permission" ||
-           toolName == "request_new_tool" || toolName == "list_my_chats" || toolName == "read_chat";
+           toolName == "request_new_tool" || toolName == "list_my_chats" || toolName == "read_chat" ||
+           toolName == "message_user";
 }
 
 } // namespace

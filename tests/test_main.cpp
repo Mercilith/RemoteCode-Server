@@ -3052,6 +3052,20 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
         readChatDefaultResponse["result"]["isError"] == false,
         "read_chat succeeds for an agent with empty tool_permissions — it's always allowed");
 
+    // message_user too — every agent needs a way to reach Cardon directly
+    // regardless of its own tool_permissions (confirmed live: an agent
+    // finished real work and had no way to report it back).
+    const std::string messageUserCall = json{
+        {"jsonrpc", "2.0"},
+        {"id", 12},
+        {"method", "tools/call"},
+        {"params", {{"name", "message_user"}, {"arguments", {{"content", "hi"}}}}},
+    }.dump();
+    const json messageUserResponse = json::parse(server.HandleLine(messageUserCall));
+    Check(
+        messageUserResponse["result"]["isError"] == false,
+        "message_user succeeds for an agent with empty tool_permissions — it's always allowed");
+
     // post_message is NOT always-allowed and tyrell has no permanent grant
     // for it — must fail closed before any temp grant exists.
     const std::string postMessageCall = json{
