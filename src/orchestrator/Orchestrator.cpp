@@ -706,7 +706,22 @@ void Orchestrator::EnsureMentionedParticipantsJoined(
     }
 }
 
+std::mutex& Orchestrator::GetChatDispatchMutex(const std::string& chatId) {
+    std::lock_guard<std::mutex> lock(chatDispatchMutexesMutex_);
+    std::unique_ptr<std::mutex>& entry = chatDispatchMutexes_[chatId];
+    if (!entry) {
+        entry = std::make_unique<std::mutex>();
+    }
+    return *entry;
+}
+
 void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
+    // Serializes concurrent dispatch passes for the same chat — see the
+    // chatDispatchMutexes_ member comment in Orchestrator.h for why this is
+    // needed. A second incoming message on this chat while a turn is still
+    // running simply waits here rather than racing the in-flight pass.
+    std::lock_guard<std::mutex> dispatchLock(GetChatDispatchMutex(chatId));
+
     Chat chat;
     if (!chatStore_->GetChat(chatId, chat)) {
         return;

@@ -320,4 +320,19 @@ private:
     };
     std::mutex agentBotClientsMutex_;
     std::unordered_map<std::string, CachedAgentBotClient> agentBotClients_;
+
+    // Two Discord messages landing close together in the same chat each spawn
+    // their own detached HandleIncomingMessage thread (see SetIncomingMessageHandler
+    // in Run()) — without per-chat serialization, both threads would concurrently
+    // read/mutate the same chat's dispatch state (agent session resume, turn-limit
+    // count, chat_participants), race on the same agent's session id, and silently
+    // stomp on each other, producing no reply from either turn. This mutex map
+    // (one std::mutex per chatId, created on first use) makes a second incoming
+    // message on a chat still already dispatching simply wait for the first pass
+    // to fully finish — HandleIncomingMessage re-reads all its state fresh from
+    // the DB at the top, so a queued-up call still dispatches correctly against
+    // whatever the prior call just posted, it just can't run concurrently with it.
+    std::mutex chatDispatchMutexesMutex_;
+    std::unordered_map<std::string, std::unique_ptr<std::mutex>> chatDispatchMutexes_;
+    std::mutex& GetChatDispatchMutex(const std::string& chatId);
 };
