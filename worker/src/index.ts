@@ -41,6 +41,32 @@ interface TurnRequest {
   repoLocalPath: string;
 }
 
+// The transcript previously rendered a "user" sender as its raw Discord
+// snowflake id (e.g. "[user:439463673333940225]") — meaningless to the
+// model, and it gave no hint that this sender is Cardon, a real participant
+// who's actually watching the chat live (via his own Discord access to
+// every channel), not a one-off requester. That's the root cause of a real
+// behavior bug: agents in a group chat kept posting a second, redundant
+// "status update for Cardon" message right after their real reply, because
+// they had no way to know he was already reading everything they wrote.
+// This is a single-user system (every agent's own systemPrompt already
+// hardcodes "Cardon" as who they work for), so a fixed display name is
+// fine — no per-installation config plumbing needed for this.
+function formatSender(m: TurnMessage): string {
+  return m.senderType === "user" ? "Cardon" : `${m.senderType}:${m.senderId}`;
+}
+
+// Repeated on every turn (not just baked into systemPrompt) for the same
+// reason addressingNote is: a resumed turn's prompt is otherwise just the
+// bare latest message, and this needs to hold regardless of which message
+// triggered the turn or how the model got here.
+const humanAwarenessNote =
+  "[Cardon (the human) sees every message posted in this chat directly and in real " +
+  "time, the moment you post it — there is no separate inbox or notification he's " +
+  "missing. Do not post a second message summarizing or repeating what you just said " +
+  "for his benefit, and do not DM him a status update unless he explicitly asks for " +
+  "one; your normal reply here already reached him.]";
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) {
@@ -87,13 +113,13 @@ async function main(): Promise<void> {
       // last turn loaded from the session file — only the newest message
       // (the one that triggered this turn) needs to go in fresh.
       const latest = request.messages[request.messages.length - 1];
-      prompt = `${addressingNote}\n\n${latest?.content ?? ""}`;
+      prompt = `${humanAwarenessNote}\n\n${addressingNote}\n\n${latest?.content ?? ""}`;
     } else {
       const transcript = request.messages
-        .map((m) => `[${m.senderType}:${m.senderId}] ${m.content}`)
+        .map((m) => `[${formatSender(m)}] ${m.content}`)
         .join("\n");
       prompt =
-        `${transcript}\n\n${addressingNote}\nRespond with your next message in the ` +
+        `${transcript}\n\n${humanAwarenessNote}\n\n${addressingNote}\nRespond with your next message in the ` +
         `conversation above, or SILENT if you're choosing not to respond.`;
     }
 
