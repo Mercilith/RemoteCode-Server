@@ -14,6 +14,7 @@ add_executable(RemoteCodeServerTests
     ${CMAKE_SOURCE_DIR}/src/db/PromptTemplateStore.cpp
     ${CMAKE_SOURCE_DIR}/src/db/TaskStore.cpp
     ${CMAKE_SOURCE_DIR}/src/db/ReminderStore.cpp
+    ${CMAKE_SOURCE_DIR}/src/db/SubagentTemplateStore.cpp
     ${CMAKE_SOURCE_DIR}/src/config/Secrets.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/McpServer.cpp
     ${CMAKE_SOURCE_DIR}/src/mcp/Tools.cpp

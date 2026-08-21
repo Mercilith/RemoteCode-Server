@@ -193,6 +193,20 @@ CREATE TABLE IF NOT EXISTS chat_agent_grants (
     created_at   INTEGER NOT NULL
 );
 )sql",
+    R"sql(
+CREATE TABLE IF NOT EXISTS subagent_templates (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    description       TEXT NOT NULL,
+    task_template     TEXT NOT NULL,
+    tool_permissions  TEXT NOT NULL,
+    scope             TEXT,
+    requires_review   INTEGER NOT NULL DEFAULT 0,
+    created_by        TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL
+);
+)sql",
 };
 
 } // namespace

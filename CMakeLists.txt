@@ -84,6 +84,7 @@ add_executable(RemoteCodeServer
     src/db/PromptTemplateStore.cpp
     src/db/TaskStore.cpp
     src/db/ReminderStore.cpp
+    src/db/SubagentTemplateStore.cpp
     src/config/ServerConfig.cpp
     src/config/Secrets.cpp
     src/discord/DiscordBot.cpp

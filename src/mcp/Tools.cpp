@@ -909,6 +909,8 @@ bool IsKnownToolName(const std::string& name) {
         "list_repos",         "import_repo",        "create_repo",
         "create_task",        "update_task_status",  "list_tasks",
         "schedule_reminder",  "list_reminders",      "cancel_reminder",
+        "spawn_subagent",     "get_subagent_status",  "get_subagent_result", "message_subagent",
+        "cancel_subagent",    "list_my_subagents",    "create_subagent_template", "list_subagent_templates",
     };
     return std::find(kKnown.begin(), kKnown.end(), name) != kKnown.end();
 }
@@ -1441,6 +1443,507 @@ json ListTasksTool(ToolContext& ctx, const json& arguments, std::string& outErro
     return json{{"tasks", out}};
 }
 
+// Generic {{key}} substitution against a caller-supplied variables object —
+// used to render a subagent_templates.task_template into a concrete task at
+// spawn_subagent time. Unlike RenderPromptTemplate (repo onboarding's fixed
+// four placeholders), the key set here is whatever the template's author
+// chose, so this just walks the object rather than hardcoding names.
+std::string RenderTemplate(const std::string& content, const json& variables) {
+    std::string out = content;
+    if (!variables.is_object()) {
+        return out;
+    }
+    for (auto it = variables.begin(); it != variables.end(); ++it) {
+        if (!it.value().is_string()) {
+            continue;
+        }
+        const std::string placeholder = "{{" + it.key() + "}}";
+        const std::string value = it.value().get<std::string>();
+        size_t pos = 0;
+        while ((pos = out.find(placeholder, pos)) != std::string::npos) {
+            out.replace(pos, placeholder.length(), value);
+            pos += value.length();
+        }
+    }
+    return out;
+}
+
+// Short, collision-safe-enough id for a freshly spawned subagent — reused
+// as the subagent's agent id, its task id (see spawn_subagent), and the
+// suffix of its dedicated chat id ("subagent-" + this).
+std::string GenerateSubagentId(const std::string& seed) {
+    static std::atomic<int> counter{0};
+    return "sub-" + Slugify(seed.substr(0, 40)) + "-" + std::to_string(time(nullptr)) + "-" +
+           std::to_string(++counter);
+}
+
+// spawn_subagent — see the "Orchestrator subagents" plan for the full
+// design. Deliberately does none of the actual dispatch work itself (this
+// runs in a DB-only MCP subprocess, same constraint every other tool here
+// is under) — it only writes the agent/chat/task/message rows in the shape
+// Orchestrator::HandleIncomingMessage's existing foreign-chat mirror loop
+// already knows how to pick up and dispatch a first turn for, since the
+// seed message below lands in a chat other than ctx.chatId.
+json SpawnSubagent(ToolContext& ctx, const json& arguments, std::string& outError) {
+    // Nesting guard (Dax's recommendation, v1's answer to the spec's one
+    // open question): a subagent cannot spawn its own subagent. Detected by
+    // the same id convention report_subagent_result relies on — a subagent
+    // task's id always equals its own assignee_agent_id.
+    Task selfTask;
+    if (ctx.taskStore.Get(ctx.agentId, selfTask) && selfTask.assigneeAgentId == ctx.agentId) {
+        outError = "spawn_subagent: subagents cannot spawn their own subagents";
+        return {};
+    }
+
+    std::string taskText;
+    json toolPermissions = json::array();
+    std::string scope;
+    bool requiresReview = false;
+
+    if (arguments.contains("template_id")) {
+        const std::string templateId = arguments["template_id"].get<std::string>();
+        SubagentTemplate tmpl;
+        if (!ctx.subagentTemplateStore.Get(templateId, tmpl)) {
+            outError = "no subagent template with id '" + templateId + "'";
+            return {};
+        }
+        taskText = RenderTemplate(tmpl.taskTemplate, arguments.value("variables", json::object()));
+        try {
+            toolPermissions = json::parse(tmpl.toolPermissionsJson);
+        } catch (const json::parse_error&) {
+            toolPermissions = json::array();
+        }
+        scope = tmpl.scope;
+        requiresReview = tmpl.requiresReview;
+    } else if (arguments.contains("task")) {
+        taskText = arguments["task"].get<std::string>();
+    } else {
+        outError = "spawn_subagent requires either 'task' or 'template_id'";
+        return {};
+    }
+    if (taskText.empty()) {
+        outError = "spawn_subagent: task is empty";
+        return {};
+    }
+
+    // Explicit args always override template defaults.
+    if (arguments.contains("tool_permissions")) {
+        if (!arguments["tool_permissions"].is_array()) {
+            outError = "spawn_subagent: tool_permissions must be an array";
+            return {};
+        }
+        toolPermissions = arguments["tool_permissions"];
+    }
+    if (arguments.contains("scope") && arguments["scope"].is_string()) {
+        scope = arguments["scope"].get<std::string>();
+    }
+    if (arguments.contains("requires_review")) {
+        requiresReview = arguments.value("requires_review", requiresReview);
+    }
+    const std::string context = arguments.value("context", std::string());
+
+    Agent parent;
+    if (!ctx.agentStore.Get(ctx.agentId, parent)) {
+        outError = "spawn_subagent: could not load your own agent record";
+        return {};
+    }
+
+    const std::string subagentId = GenerateSubagentId(taskText);
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+
+    // Inherit the parent's system prompt in full (spec §3: "restrict
+    // capability, not knowledge" — a subagent working from a stripped-down
+    // prompt is exactly how a previously-fixed bug gets silently
+    // reintroduced), plus a short delegation preamble. The task itself goes
+    // into the seed chat message below, not here, so it reads naturally as
+    // "what to do right now" rather than a persistent rule.
+    std::ostringstream promptBuilder;
+    promptBuilder << parent.systemPrompt << "\n\n---\n\nYou are currently operating as an orchestrator "
+                  << "subagent, spawned by '" << parent.name << "' (" << ctx.agentId
+                  << ") to handle one specific delegated task, described in the chat message below. Do "
+                     "not spawn further subagents of your own. When you are finished — whether you "
+                     "succeeded, got blocked, or want to flag something for review — call "
+                     "report_subagent_result exactly once; that is the only way your parent finds out "
+                     "you're done.";
+
+    Agent subagent;
+    subagent.id = subagentId;
+    subagent.name = "subagent: " + taskText.substr(0, 60);
+    subagent.description = "Ephemeral orchestrator subagent spawned by '" + ctx.agentId + "'.";
+    subagent.systemPrompt = promptBuilder.str();
+    subagent.status = "active";
+    // Explicit allow-list, not inherited wholesale (spec §3) — empty unless
+    // the caller/template passed one, so a freshly spawned subagent starts
+    // restrictive by default.
+    subagent.toolPermissionsJson = toolPermissions.dump();
+    subagent.canMessageJson = json::array({ctx.agentId}).dump();
+    subagent.createdBy = ctx.agentId;
+    subagent.createdAt = now;
+    subagent.updatedAt = now;
+    if (!ctx.agentStore.Upsert(subagent)) {
+        outError = "spawn_subagent: failed to create the subagent";
+        return {};
+    }
+    // Inherited unchanged, not narrowed by `scope` — no path-glob
+    // enforcement exists anywhere in this codebase (repoLocalPath is
+    // already a soft, prompt-level boundary only), so scope is conveyed as
+    // an instruction in the seed message instead, same trust level as
+    // everything else repoLocalPath already relies on.
+    if (!parent.repoLocalPath.empty()) {
+        ctx.agentStore.SetRepoLocalPath(subagentId, parent.repoLocalPath);
+    }
+    ctx.agentStore.SetFact(subagentId, "requires_review", requiresReview ? "true" : "false");
+
+    const std::string subagentChatId = "subagent-" + subagentId;
+    Chat chat;
+    chat.id = subagentChatId;
+    chat.title = subagent.name;
+    chat.createdBy = ctx.agentId;
+    chat.status = "active";
+    // No Discord channel, deliberately — a subagent's working chat stays
+    // DB-only so potentially high-volume background/parallel work never
+    // clutters Discord. Turns run fine without discord_channel_id (every
+    // Discord-post call site already gates on it being non-empty).
+    chat.createdAt = now;
+    if (!ctx.chatStore.CreateChat(chat)) {
+        outError = "spawn_subagent: failed to create the subagent's chat";
+        return {};
+    }
+    ctx.chatStore.AddParticipant(subagentChatId, "agent", subagentId);
+
+    Task task;
+    task.id = subagentId;
+    // The ORIGIN chat (wherever the parent was when it called
+    // spawn_subagent) — reused as-is by report_subagent_result to know
+    // where to wake the parent back up.
+    task.chatId = ctx.chatId;
+    task.title = taskText.substr(0, 80);
+    task.description = taskText;
+    task.status = TaskStatus::kInProgress;
+    task.assigneeAgentId = subagentId;
+    task.createdBy = ctx.agentId;
+    task.createdAt = now;
+    task.updatedAt = now;
+    if (!ctx.taskStore.Create(task)) {
+        outError = "spawn_subagent: failed to create the tracking task";
+        return {};
+    }
+
+    std::ostringstream seedContent;
+    seedContent << taskText;
+    if (!scope.empty()) {
+        seedContent << "\n\nScope: you should restrict your work to " << scope
+                    << ". This is an instruction, not an enforced sandbox — stay within it.";
+    }
+    if (!context.empty()) {
+        seedContent << "\n\nAdditional context from your parent:\n" << context;
+    }
+
+    Message seed;
+    seed.chatId = subagentChatId;
+    seed.senderType = "agent";
+    seed.senderId = ctx.agentId;
+    seed.type = "text";
+    seed.content = seedContent.str();
+    seed.createdAt = now;
+    // This is the message that gets the subagent's first turn dispatched:
+    // it's a different chat_id than the one this turn is running in, so
+    // Orchestrator::HandleIncomingMessage's mirror loop (produced.chatId !=
+    // chatId) detects it as a foreign chat and dispatches a turn there.
+    if (ctx.chatStore.InsertMessage(seed) < 0) {
+        outError = "spawn_subagent: failed to seed the subagent's task";
+        return {};
+    }
+
+    return json{{"subagent_id", subagentId}, {"status", TaskStatus::kInProgress}};
+}
+
+// report_subagent_result — callable only by an agent that IS a subagent
+// (its own id must be the assignee of a task with that same id, the
+// convention spawn_subagent establishes). Always-allowed (see
+// IsAlwaysAllowedTool) since a subagent's own tool_permissions may be empty
+// and it must always be able to conclude.
+json ReportSubagentResult(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("success") || !arguments["success"].is_boolean() || !arguments.contains("summary")) {
+        outError = "report_subagent_result requires a boolean 'success' and a 'summary'";
+        return {};
+    }
+    const bool success = arguments["success"].get<bool>();
+    const std::string summary = arguments["summary"].get<std::string>();
+
+    Task task;
+    if (!ctx.taskStore.Get(ctx.agentId, task) || task.assigneeAgentId != ctx.agentId) {
+        outError =
+            "report_subagent_result: you are not the assignee of an orchestrator-subagent task (this "
+            "tool is only for agents spawned via spawn_subagent)";
+        return {};
+    }
+
+    std::string requiresReviewFact;
+    const bool spawnTimeReview = ctx.agentStore.GetFact(ctx.agentId, "requires_review", requiresReviewFact) &&
+                                  requiresReviewFact == "true";
+    const bool needsReview = spawnTimeReview || arguments.value("requires_review", false);
+    // §5's "requires review, cannot auto-complete" maps directly onto the
+    // existing TaskStatus::kInReview value — no new column needed. A hard
+    // failure always lands on kBlocked regardless of the review flag.
+    const std::string finalStatus =
+        !success ? TaskStatus::kBlocked : (needsReview ? TaskStatus::kInReview : TaskStatus::kDone);
+
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    if (!ctx.taskStore.UpdateStatus(task.id, finalStatus, false, "", now)) {
+        outError = "report_subagent_result: failed to update task status";
+        return {};
+    }
+
+    json metadata;
+    metadata["success"] = success;
+    metadata["summary"] = summary;
+    if (arguments.contains("commands_run")) {
+        metadata["commands_run"] = arguments["commands_run"];
+    }
+    if (arguments.contains("pass_count")) {
+        metadata["pass_count"] = arguments["pass_count"];
+    }
+    if (arguments.contains("fail_count")) {
+        metadata["fail_count"] = arguments["fail_count"];
+    }
+    if (arguments.contains("undocumented_findings")) {
+        metadata["undocumented_findings"] = arguments["undocumented_findings"];
+    }
+    if (arguments.contains("notes")) {
+        metadata["notes"] = arguments["notes"];
+    }
+    metadata["requires_review"] = needsReview;
+    const std::string metadataJson = metadata.dump();
+
+    // The structured report, in the subagent's own working chat (audit
+    // trail — spec §6).
+    Message report;
+    report.chatId = ctx.chatId;
+    report.senderType = "agent";
+    report.senderId = ctx.agentId;
+    report.type = "subagent_result";
+    report.content = summary;
+    report.metadataJson = metadataJson;
+    report.createdAt = now;
+    ctx.chatStore.InsertMessage(report);
+
+    // Wake the parent up, non-polling: post into the ORIGIN chat
+    // (task.chatId), a foreign chat relative to this turn, so the same
+    // mirror-loop mechanism that dispatched this subagent's first turn
+    // dispatches a fresh turn for the parent too.
+    if (!task.chatId.empty()) {
+        Message wakeup;
+        wakeup.chatId = task.chatId;
+        wakeup.senderType = "agent";
+        wakeup.senderId = ctx.agentId;
+        wakeup.type = "text";
+        wakeup.content = "Subagent '" + ctx.agentId + "' finished (" + finalStatus + "): " + summary;
+        wakeup.metadataJson = metadataJson;
+        wakeup.createdAt = now;
+        ctx.chatStore.InsertMessage(wakeup);
+    }
+
+    // Disabled last, once nothing else this call needs it active for — a
+    // finished subagent can never be re-triggered into another turn.
+    Agent subagent;
+    if (ctx.agentStore.Get(ctx.agentId, subagent)) {
+        subagent.status = "disabled";
+        subagent.updatedAt = now;
+        ctx.agentStore.Upsert(subagent);
+    }
+
+    return json{{"task_id", task.id}, {"status", finalStatus}};
+}
+
+// Shared by get_subagent_status/get_subagent_result/message_subagent/
+// cancel_subagent — every one of them is ownership-checked the same way: a
+// subagent's task.id doubles as its subagent_id, and only the agent that
+// spawned it (task.createdBy) may query or steer it.
+bool LoadOwnedSubagentTask(ToolContext& ctx, const json& arguments, Task& outTask, std::string& outError) {
+    if (!arguments.contains("subagent_id") || !arguments["subagent_id"].is_string()) {
+        outError = "requires 'subagent_id'";
+        return false;
+    }
+    const std::string subagentId = arguments["subagent_id"].get<std::string>();
+    if (!ctx.taskStore.Get(subagentId, outTask) || outTask.assigneeAgentId != subagentId) {
+        outError = "no subagent with id '" + subagentId + "'";
+        return false;
+    }
+    if (outTask.createdBy != ctx.agentId) {
+        outError = "you did not spawn this subagent";
+        return false;
+    }
+    return true;
+}
+
+json GetSubagentStatus(ToolContext& ctx, const json& arguments, std::string& outError) {
+    Task task;
+    if (!LoadOwnedSubagentTask(ctx, arguments, task, outError)) {
+        return {};
+    }
+    return json{{"subagent_id", task.id}, {"status", task.status}};
+}
+
+json GetSubagentResult(ToolContext& ctx, const json& arguments, std::string& outError) {
+    Task task;
+    if (!LoadOwnedSubagentTask(ctx, arguments, task, outError)) {
+        return {};
+    }
+    const std::vector<Message> messages = ctx.chatStore.RecentMessages("subagent-" + task.id, 50);
+    for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
+        if (it->type == "subagent_result" && it->senderId == task.id) {
+            json parsed;
+            try {
+                parsed = json::parse(it->metadataJson);
+            } catch (const json::parse_error&) {
+                parsed = json::object();
+            }
+            parsed["status"] = task.status;
+            return parsed;
+        }
+    }
+    return json{
+        {"status", task.status},
+        {"result", nullptr},
+        {"note", task.status == TaskStatus::kInProgress ? "still running, no report filed yet"
+                                                          : "the subagent finished without filing a "
+                                                            "structured report (via report_subagent_result)"}};
+}
+
+json MessageSubagent(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("text")) {
+        outError = "message_subagent requires 'subagent_id' and 'text'";
+        return {};
+    }
+    Task task;
+    if (!LoadOwnedSubagentTask(ctx, arguments, task, outError)) {
+        return {};
+    }
+    Message message;
+    message.chatId = "subagent-" + task.id;
+    message.senderType = "agent";
+    message.senderId = ctx.agentId;
+    message.type = "text";
+    message.content = arguments["text"].get<std::string>();
+    message.createdAt = static_cast<int64_t>(time(nullptr));
+    if (ctx.chatStore.InsertMessage(message) < 0) {
+        outError = "failed to insert message";
+        return {};
+    }
+    return json{{"status", "sent"}};
+}
+
+json CancelSubagent(ToolContext& ctx, const json& arguments, std::string& outError) {
+    Task task;
+    if (!LoadOwnedSubagentTask(ctx, arguments, task, outError)) {
+        return {};
+    }
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    // Best-effort only: this cannot interrupt a turn already in flight — no
+    // such preemption mechanism exists anywhere in this codebase. It only
+    // prevents any FUTURE turn (the disabled agent.status below, and the
+    // cancelled task status a re-dispatch would otherwise ignore).
+    if (!ctx.taskStore.UpdateStatus(task.id, TaskStatus::kCancelled, false, "", now)) {
+        outError = "failed to cancel subagent";
+        return {};
+    }
+    Agent subagent;
+    if (ctx.agentStore.Get(task.id, subagent)) {
+        subagent.status = "disabled";
+        subagent.updatedAt = now;
+        ctx.agentStore.Upsert(subagent);
+    }
+    return json{{"subagent_id", task.id}, {"status", TaskStatus::kCancelled}};
+}
+
+json ListMySubagents(ToolContext& ctx, const json& arguments, std::string& outError) {
+    const std::string status = arguments.value("status", std::string());
+    if (!status.empty() && !TaskStatus::IsValid(status)) {
+        outError = "status must be one of " + TaskStatus::ValidList() + " (got '" + status + "')";
+        return {};
+    }
+    json out = json::array();
+    for (const Task& task : ctx.taskStore.List(status, "", "")) {
+        // Subagent tasks always have id == assignee_agent_id (the
+        // spawn_subagent convention) — filters out ordinary create_task
+        // rows that happen to share a status/assignee, so this list is
+        // only ever real subagents this agent spawned.
+        if (task.createdBy != ctx.agentId || task.assigneeAgentId != task.id) {
+            continue;
+        }
+        out.push_back(json{
+            {"subagent_id", task.id},
+            {"title", task.title},
+            {"status", task.status},
+            {"created_at", task.createdAt},
+        });
+    }
+    return json{{"subagents", out}};
+}
+
+json CreateSubagentTemplateTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    if (!arguments.contains("name") || !arguments.contains("description") || !arguments.contains("task_template")) {
+        outError = "create_subagent_template requires 'name', 'description', 'task_template'";
+        return {};
+    }
+    const json toolPermissionsArg = arguments.value("tool_permissions", json::array());
+    if (!toolPermissionsArg.is_array()) {
+        outError = "create_subagent_template: tool_permissions must be an array";
+        return {};
+    }
+    const int64_t now = static_cast<int64_t>(time(nullptr));
+    const std::string name = arguments["name"].get<std::string>();
+
+    SubagentTemplate tmpl;
+    tmpl.id = Slugify(name);
+    tmpl.name = name;
+    tmpl.description = arguments["description"].get<std::string>();
+    tmpl.taskTemplate = arguments["task_template"].get<std::string>();
+    tmpl.toolPermissionsJson = toolPermissionsArg.dump();
+    tmpl.scope = arguments.value("scope", std::string());
+    tmpl.requiresReview = arguments.value("requires_review", false);
+    tmpl.createdBy = ctx.agentId;
+    tmpl.createdAt = now;
+    tmpl.updatedAt = now;
+    if (!ctx.subagentTemplateStore.Upsert(tmpl)) {
+        outError = "failed to save the subagent template";
+        return {};
+    }
+    return json{{"template_id", tmpl.id}, {"status", "saved"}};
+}
+
+json ListSubagentTemplatesTool(ToolContext& ctx, const json& arguments, std::string& outError) {
+    (void)outError;
+    std::string filterId;
+    if (arguments.contains("id") && arguments["id"].is_string()) {
+        filterId = arguments["id"].get<std::string>();
+    }
+    json out = json::array();
+    for (const SubagentTemplate& tmpl : ctx.subagentTemplateStore.ListAll()) {
+        if (!filterId.empty() && tmpl.id != filterId) {
+            continue;
+        }
+        json toolPermissions;
+        try {
+            toolPermissions = json::parse(tmpl.toolPermissionsJson);
+        } catch (const json::parse_error&) {
+            toolPermissions = json::array();
+        }
+        out.push_back(json{
+            {"id", tmpl.id},
+            {"name", tmpl.name},
+            {"description", tmpl.description},
+            {"task_template", tmpl.taskTemplate},
+            {"tool_permissions", toolPermissions},
+            {"scope", tmpl.scope},
+            {"requires_review", tmpl.requiresReview},
+            {"created_by", tmpl.createdBy},
+        });
+    }
+    return json{{"templates", out}};
+}
+
 // schedule_reminder — chat_id is REQUIRED (unlike post_message/read_chat's
 // optional chat_id, there's no sensible "current chat" default for a
 // reminder meant to fire well after this turn ends) and always goes through
@@ -1640,10 +2143,18 @@ json RequestNewTool(ToolContext& ctx, const json& arguments, std::string& outErr
 // should be UNABLE to reach Cardon directly), so it belongs alongside
 // list_my_chats/read_chat here rather than depending on each agent's
 // tool_permissions happening to include it.
+//
+// report_subagent_result is the equivalent baseline for orchestrator
+// subagents specifically: spawn_subagent deliberately hands a fresh
+// subagent an explicit, often-empty tool_permissions allow-list (spec §3,
+// restrictive by default), but it must always be able to conclude its one
+// task regardless of what else it was or wasn't granted — otherwise a
+// narrowly-scoped subagent could finish its work and then have no way to
+// ever report back, leaving its parent waiting forever.
 bool IsAlwaysAllowedTool(const std::string& toolName) {
     return toolName == "remember" || toolName == "request_temporary_permission" ||
            toolName == "request_new_tool" || toolName == "list_my_chats" || toolName == "read_chat" ||
-           toolName == "message_user";
+           toolName == "message_user" || toolName == "report_subagent_result";
 }
 
 } // namespace
@@ -2282,6 +2793,160 @@ json Tools::Definitions() {
              }},
         },
         {
+            {"name", "spawn_subagent"},
+            {"description",
+             "Spawn a scoped, ephemeral orchestrator subagent to handle a delegated task — background "
+             "verification, isolated investigation, or parallel work on a decoupled part of a codebase "
+             "— without losing your own place in the main task. Pass either 'task' (a free-text "
+             "instruction) or 'template_id' (a preset saved via create_subagent_template, rendered "
+             "against 'variables'). tool_permissions is an explicit allow-list for the subagent — "
+             "restrictive by default, not inherited from you. Set requires_review true for work that "
+             "should never be treated as auto-complete (e.g. schema migrations, sync/crypto code) — "
+             "the subagent's final status becomes 'in_review' instead of 'done'. Subagents cannot spawn "
+             "their own subagents. Once spawned, use get_subagent_status/get_subagent_result/"
+             "message_subagent/cancel_subagent/list_my_subagents to monitor and steer it — you'll also "
+             "be woken up automatically with its result once it finishes, no polling required."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"task", {{"type", "string"}, {"description", "Required unless template_id is given."}}},
+                      {"template_id", {{"type", "string"}}},
+                      {"variables",
+                       {{"type", "object"}, {"description", "{{key}}-substitution values for template_id's task_template."}}},
+                      {"scope",
+                       {{"type", "string"},
+                        {"description", "A path/directory restriction, conveyed as an instruction (not enforced)."}}},
+                      {"tool_permissions", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"context", {{"type", "string"}, {"description", "Anything beyond the task itself the subagent needs."}}},
+                      {"requires_review", {{"type", "boolean"}}},
+                  }},
+             }},
+        },
+        {
+            {"name", "report_subagent_result"},
+            {"description",
+             "Called by an orchestrator subagent (never by its parent) to conclude its one delegated "
+             "task — the only way your parent finds out you're done. Call exactly once, whether you "
+             "succeeded, got blocked, or want to flag something for human/parent review. summary should "
+             "be a real structured account, not a vague 'looks good' — for verification-style tasks, "
+             "include the exact commands you ran and pass/fail counts."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"success", {{"type", "boolean"}}},
+                      {"summary", {{"type", "string"}}},
+                      {"commands_run", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"pass_count", {{"type", "integer"}}},
+                      {"fail_count", {{"type", "integer"}}},
+                      {"undocumented_findings",
+                       {{"type", "string"},
+                        {"description", "Anything encountered that isn't already documented anywhere, worth feeding back."}}},
+                      {"notes", {{"type", "string"}}},
+                      {"requires_review",
+                       {{"type", "boolean"},
+                        {"description", "Flag this result for review even if spawn_subagent didn't ask for it."}}},
+                  }},
+                 {"required", json::array({"success", "summary"})},
+             }},
+        },
+        {
+            {"name", "get_subagent_status"},
+            {"description", "Check the status of a subagent you spawned: 'in_progress', 'blocked', 'in_review', 'done', or 'cancelled'."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"subagent_id", {{"type", "string"}}}}},
+                 {"required", json::array({"subagent_id"})},
+             }},
+        },
+        {
+            {"name", "get_subagent_result"},
+            {"description",
+             "Fetch the structured result a subagent you spawned reported via report_subagent_result "
+             "(or a status note if it hasn't reported one yet)."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"subagent_id", {{"type", "string"}}}}},
+                 {"required", json::array({"subagent_id"})},
+             }},
+        },
+        {
+            {"name", "message_subagent"},
+            {"description",
+             "Send a follow-up message to a subagent you spawned — to steer or correct it. It's read on "
+             "the subagent's next turn, not necessarily mid-turn."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"subagent_id", {{"type", "string"}}},
+                      {"text", {{"type", "string"}}},
+                  }},
+                 {"required", json::array({"subagent_id", "text"})},
+             }},
+        },
+        {
+            {"name", "cancel_subagent"},
+            {"description",
+             "Cancel a subagent you spawned. Best-effort — cannot interrupt a turn already in flight, "
+             "only prevents any future one."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"subagent_id", {{"type", "string"}}}}},
+                 {"required", json::array({"subagent_id"})},
+             }},
+        },
+        {
+            {"name", "list_my_subagents"},
+            {"description", "List the subagents you've spawned, optionally filtered by status."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {{"status",
+                    {{"type", "string"},
+                     {"description", "'in_progress', 'blocked', 'in_review', 'done', or 'cancelled'."}}}}},
+             }},
+        },
+        {
+            {"name", "create_subagent_template"},
+            {"description",
+             "Save a reusable orchestrator-subagent preset: a named task_template (with optional "
+             "{{key}} placeholders filled in later via spawn_subagent's 'variables'), plus default "
+             "tool_permissions/scope/requires_review. Upserts by a slug of 'name' — calling again with "
+             "the same name updates the existing template."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties",
+                  {
+                      {"name", {{"type", "string"}}},
+                      {"description", {{"type", "string"}}},
+                      {"task_template", {{"type", "string"}}},
+                      {"tool_permissions", {{"type", "array"}, {"items", {{"type", "string"}}}}},
+                      {"scope", {{"type", "string"}}},
+                      {"requires_review", {{"type", "boolean"}}},
+                  }},
+                 {"required", json::array({"name", "description", "task_template"})},
+             }},
+        },
+        {
+            {"name", "list_subagent_templates"},
+            {"description", "List saved reusable orchestrator-subagent templates, optionally filtered by id."},
+            {"inputSchema",
+             {
+                 {"type", "object"},
+                 {"properties", {{"id", {{"type", "string"}}}}},
+             }},
+        },
+        {
             {"name", "request_new_tool"},
             {"description",
              "Ask Cardon for a brand-new tool, or for an existing tool's functionality to be extended, "
@@ -2441,6 +3106,24 @@ json Tools::Call(ToolContext& ctx, const std::string& toolName, const json& argu
         result = ListRemindersTool(ctx, arguments, outError);
     } else if (toolName == "cancel_reminder") {
         result = CancelReminderTool(ctx, arguments, outError);
+    } else if (toolName == "spawn_subagent") {
+        result = SpawnSubagent(ctx, arguments, outError);
+    } else if (toolName == "report_subagent_result") {
+        result = ReportSubagentResult(ctx, arguments, outError);
+    } else if (toolName == "get_subagent_status") {
+        result = GetSubagentStatus(ctx, arguments, outError);
+    } else if (toolName == "get_subagent_result") {
+        result = GetSubagentResult(ctx, arguments, outError);
+    } else if (toolName == "message_subagent") {
+        result = MessageSubagent(ctx, arguments, outError);
+    } else if (toolName == "cancel_subagent") {
+        result = CancelSubagent(ctx, arguments, outError);
+    } else if (toolName == "list_my_subagents") {
+        result = ListMySubagents(ctx, arguments, outError);
+    } else if (toolName == "create_subagent_template") {
+        result = CreateSubagentTemplateTool(ctx, arguments, outError);
+    } else if (toolName == "list_subagent_templates") {
+        result = ListSubagentTemplatesTool(ctx, arguments, outError);
     } else {
         outError = "unknown tool: " + toolName;
     }

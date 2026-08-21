@@ -8,6 +8,7 @@
 #include "../db/PromptTemplateStore.h"
 #include "../db/ReminderStore.h"
 #include "../db/RepoStore.h"
+#include "../db/SubagentTemplateStore.h"
 #include "../db/TaskStore.h"
 #include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
@@ -24,7 +25,8 @@ public:
         ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore,
         PromptTemplateStore& promptTemplateStore, RepoStore& repoStore, WorkspaceStore& workspaceStore,
         TempPermissionStore& tempPermissionStore, TaskStore& taskStore, ReminderStore& reminderStore,
-        ActivityLog& activityLog, std::string agentId, std::string chatId);
+        SubagentTemplateStore& subagentTemplateStore, ActivityLog& activityLog, std::string agentId,
+        std::string chatId);
 
     // Processes one JSON-RPC message (a single line, no trailing newline)
     // and returns the response line to write back, or an empty string if
@@ -45,6 +47,7 @@ private:
     TempPermissionStore& tempPermissionStore_;
     TaskStore& taskStore_;
     ReminderStore& reminderStore_;
+    SubagentTemplateStore& subagentTemplateStore_;
     ActivityLog& activityLog_;
     std::string agentId_;
     std::string chatId_;

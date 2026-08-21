@@ -31,7 +31,8 @@ McpServer::McpServer(
     ChatStore& chatStore, AgentStore& agentStore, ApprovalStore& approvalStore,
     PromptTemplateStore& promptTemplateStore, RepoStore& repoStore, WorkspaceStore& workspaceStore,
     TempPermissionStore& tempPermissionStore, TaskStore& taskStore, ReminderStore& reminderStore,
-    ActivityLog& activityLog, std::string agentId, std::string chatId)
+    SubagentTemplateStore& subagentTemplateStore, ActivityLog& activityLog, std::string agentId,
+    std::string chatId)
     : chatStore_(chatStore),
       agentStore_(agentStore),
       approvalStore_(approvalStore),
@@ -41,6 +42,7 @@ McpServer::McpServer(
       tempPermissionStore_(tempPermissionStore),
       taskStore_(taskStore),
       reminderStore_(reminderStore),
+      subagentTemplateStore_(subagentTemplateStore),
       activityLog_(activityLog),
       agentId_(std::move(agentId)),
       chatId_(std::move(chatId)) {}
@@ -79,9 +81,9 @@ std::string McpServer::HandleLine(const std::string& line) {
         const json arguments = params.value("arguments", json::object());
 
         ToolContext ctx{
-            chatStore_,       agentStore_,          approvalStore_, promptTemplateStore_, repoStore_,
-            workspaceStore_,  tempPermissionStore_, taskStore_,     reminderStore_,       activityLog_,
-            agentId_,         chatId_};
+            chatStore_,       agentStore_,          approvalStore_, promptTemplateStore_,   repoStore_,
+            workspaceStore_,  tempPermissionStore_, taskStore_,     reminderStore_,         subagentTemplateStore_,
+            activityLog_,     agentId_,             chatId_};
         std::string errorMessage;
         const json result = Tools::Call(ctx, toolName, arguments, errorMessage);
 

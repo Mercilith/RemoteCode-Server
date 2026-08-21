@@ -8,6 +8,7 @@
 #include "../db/PromptTemplateStore.h"
 #include "../db/ReminderStore.h"
 #include "../db/RepoStore.h"
+#include "../db/SubagentTemplateStore.h"
 #include "../db/TaskStore.h"
 #include "../db/TempPermissionStore.h"
 #include "../db/WorkspaceStore.h"
@@ -38,6 +39,8 @@ struct ToolContext {
     // here to create/list/cancel a `reminders` row, same DB-only split as
     // create_workspace/add_agent_to_workspace.
     ReminderStore& reminderStore;
+    // Backs create_subagent_template/list_subagent_templates.
+    SubagentTemplateStore& subagentTemplateStore;
     ActivityLog& activityLog;
     std::string agentId; // the agent this MCP server instance is scoped to
     std::string chatId;  // the chat this turn is happening in — the default

@@ -13,6 +13,7 @@
 #include "../src/db/ReminderStore.h"
 #include "../src/db/RepoStore.h"
 #include "../src/db/Schema.h"
+#include "../src/db/SubagentTemplateStore.h"
 #include "../src/db/TaskStore.h"
 #include "../src/db/TempPermissionStore.h"
 #include "../src/db/WorkspaceStore.h"
@@ -552,6 +553,7 @@ void TestMcpServer() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -564,7 +566,7 @@ void TestMcpServer() {
 
     ActivityLog activityLog(L"test-logs", "test-mcp");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     // Notification (no "id") must produce no response.
@@ -578,7 +580,7 @@ void TestMcpServer() {
 
     const json listResponse = json::parse(server.HandleLine(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})"));
     const json& tools = listResponse["result"]["tools"];
-    Check(tools.is_array() && tools.size() == 34, "McpServer: tools/list returns exactly 34 tools");
+    Check(tools.is_array() && tools.size() == 43, "McpServer: tools/list returns exactly 43 tools");
 
     // post_message with no chat_id must default to the server's scoped chat.
     const std::string postCall = json{
@@ -645,6 +647,7 @@ void TestChatParticipationEnforcement() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat ownChat;
     ownChat.id = "dm-alex";
@@ -674,7 +677,7 @@ void TestChatParticipationEnforcement() {
 
     ActivityLog activityLog(L"test-logs", "test-mcp-participation");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "alex", "dm-alex");
 
     const json readOther = json::parse(server.HandleLine(json{
@@ -726,6 +729,7 @@ void TestApprovalWorkflowTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -738,7 +742,7 @@ void TestApprovalWorkflowTool() {
 
     ActivityLog activityLog(L"test-logs", "test-approval");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string submitCall = json{
@@ -799,6 +803,7 @@ void TestMessageUserTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -811,7 +816,7 @@ void TestMessageUserTool() {
 
     ActivityLog activityLog(L"test-logs", "test-message-user");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string messageUserCall = json{
@@ -858,6 +863,7 @@ void TestPostMessageAttachments() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -870,7 +876,7 @@ void TestPostMessageAttachments() {
 
     ActivityLog activityLog(L"test-logs", "test-attachments");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "tyrell", "chat-1");
 
     // A valid attachment round-trips into the stored message's metadata.
@@ -952,6 +958,7 @@ void TestMessageUserToolPicksFreshIdWhenBareOneIsArchived() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     // Simulate an agent whose one-and-only DM was closed a while back —
     // no active DM exists, but the bare id is already taken.
@@ -968,7 +975,7 @@ void TestMessageUserToolPicksFreshIdWhenBareOneIsArchived() {
     ActivityLog activityLog(L"test-logs", "test-message-user-collision");
     McpServer server(
         chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
-        taskStore, reminderStore, activityLog, "alex", "chat-1");
+        taskStore, reminderStore, subagentTemplateStore, activityLog, "alex", "chat-1");
 
     const json response = json::parse(server.HandleLine(json{
         {"jsonrpc", "2.0"},
@@ -997,6 +1004,7 @@ void TestUpdateAgentTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Agent target;
     target.id = "target-agent";
@@ -1014,7 +1022,7 @@ void TestUpdateAgentTool() {
 
     ActivityLog activityLog(L"test-logs", "test-update");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string updateCall = json{
@@ -1062,6 +1070,7 @@ void TestToolPermissionEnforcement() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -1076,7 +1085,7 @@ void TestToolPermissionEnforcement() {
 
     ActivityLog activityLog(L"test-logs", "test-permission-denied");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string postCall = json{
@@ -1102,7 +1111,7 @@ void TestToolPermissionEnforcement() {
     // Unknown agent id (no row at all) must also fail closed, not crash.
     ActivityLog activityLog2(L"test-logs", "test-permission-unknown-agent");
     McpServer serverUnknownAgent(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog2,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog2,
         "nobody", "chat-1");
     const json unknownAgentResponse = json::parse(serverUnknownAgent.HandleLine(postCall));
     Check(
@@ -1123,11 +1132,12 @@ void TestRememberTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     SeedTestAgent(agentStore, "alex", {"remember"});
 
     ActivityLog activityLog(L"test-logs", "test-remember");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string rememberCall = json{
@@ -1160,6 +1170,7 @@ void TestListAgentsTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     SeedTestAgent(agentStore, "alex", {"list_agents"});
 
     Agent disabled;
@@ -1177,7 +1188,7 @@ void TestListAgentsTool() {
 
     ActivityLog activityLog(L"test-logs", "test-list-agents");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string listCall = json{
@@ -1208,6 +1219,7 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     // Alex holds update_agent, so should see tool_permissions/can_message.
     SeedTestAgent(agentStore, "alex", {"list_agents", "update_agent"});
     // Tyrell doesn't, so should NOT — but still needs list_agents itself to
@@ -1224,7 +1236,7 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     // As alex (holds update_agent): permissions should be visible.
     {
         McpServer server(
-            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
             "alex", "chat-1");
         const std::string listCall = json{
             {"jsonrpc", "2.0"},
@@ -1256,7 +1268,7 @@ void TestListAgentsToolExposesPermissionsToUpdateAgentHolder() {
     // As tyrell (no update_agent): permissions should be hidden.
     {
         McpServer server(
-            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
             "tyrell", "chat-1");
         const std::string listCall = json{
             {"jsonrpc", "2.0"},
@@ -1295,12 +1307,13 @@ void TestListAgentsToolFiltersByAgentIdAndSections() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     SeedTestAgent(agentStore, "alex", {"list_agents", "update_agent"});
     SeedTestAgent(agentStore, "tyrell", {"list_agents", "post_message", "read_chat"});
 
     ActivityLog activityLog(L"test-logs", "test-list-agents-filters");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     // agent_id narrows to just that one agent.
@@ -1362,6 +1375,7 @@ void TestStartChatAndListMyChatsTools() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     // Seed the calling agent (alex) plus two targets, one alex is allowed to
     // message and one it isn't — start_chat's can_message check needs real
@@ -1429,7 +1443,7 @@ void TestStartChatAndListMyChatsTools() {
 
     ActivityLog activityLog(L"test-logs", "test-start-chat");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     // can_message rejection path: charlie isn't in alex's can_message.
@@ -1530,11 +1544,12 @@ void TestStartChatWithNoOtherParticipants() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     SeedTestAgent(agentStore, "tyrell", {"start_chat"});
 
     ActivityLog activityLog(L"test-logs", "test-start-chat-solo");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "tyrell", "chat-1");
 
     // Omitting participant_ids entirely must succeed — a chat with just the
@@ -1918,6 +1933,7 @@ void TestWorkspaceCreatorValidation() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     // Empty request is rejected before anything else is touched.
     const WorkspaceCreator::Result emptyResult =
@@ -1976,6 +1992,7 @@ void TestCreateWorkspaceToolValidation() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -1990,7 +2007,7 @@ void TestCreateWorkspaceToolValidation() {
     // No permission granted at all — must fail closed like every other tool.
     SeedTestAgent(agentStore, "tyrell", {"post_message"});
     McpServer serverNoPermission(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "tyrell", "chat-1");
     const std::string createCall = json{
         {"jsonrpc", "2.0"},
@@ -2009,7 +2026,7 @@ void TestCreateWorkspaceToolValidation() {
     SeedTestAgent(agentStore, "tyrell", {"create_workspace"});
     ActivityLog activityLog2(L"test-logs", "test-create-workspace-2");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog2,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog2,
         "tyrell", "chat-1");
 
     const std::string missingArgCall = json{
@@ -2128,6 +2145,7 @@ void TestGitHubPrIssueToolsValidation() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2152,7 +2170,7 @@ void TestGitHubPrIssueToolsValidation() {
          "set_issue_status"});
     ActivityLog activityLog(L"test-logs", "test-gh-pr-issue-tools");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "tyrell", "chat-1");
 
     int nextId = 1;
@@ -2174,7 +2192,7 @@ void TestGitHubPrIssueToolsValidation() {
         ActivityLog denyLog(L"test-logs", "test-gh-pr-issue-tools-deny");
         McpServer deniedServer(
             chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore,
-            tempPermissionStore, taskStore, reminderStore, denyLog, "no-permissions-agent", "chat-1");
+            tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, denyLog, "no-permissions-agent", "chat-1");
         SeedTestAgent(agentStore, "no-permissions-agent", {});
         const std::string line = json{
             {"jsonrpc", "2.0"},
@@ -2336,12 +2354,13 @@ void TestPromptTemplateMcpTools() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
     promptTemplateStore.SeedDefaultsIfEmpty();
     SeedTestAgent(agentStore, "alex", {"get_prompt_template", "update_prompt_template"});
 
     ActivityLog activityLog(L"test-logs", "test-prompt-templates");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string getCall = json{
@@ -2534,6 +2553,7 @@ void TestRequestAddAgentToChatTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2556,7 +2576,7 @@ void TestRequestAddAgentToChatTool() {
 
     ActivityLog activityLog(L"test-logs", "test-request-add-agent");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "alex", "chat-1");
 
     const std::string requestCall = json{
@@ -2616,6 +2636,7 @@ void TestAddAgentToChatTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2644,7 +2665,7 @@ void TestAddAgentToChatTool() {
 
     ActivityLog activityLog(L"test-logs", "test-add-agent-to-chat");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "tyrell", "chat-1");
 
     const std::string call = json{
@@ -2703,7 +2724,7 @@ void TestAddAgentToChatTool() {
     chatStore.AddParticipant("chat-1", "agent", "restricted");
 
     McpServer restrictedServer(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, activityLog,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog,
         "restricted", "chat-1");
     SeedTestAgent(agentStore, "unreachable", {});
     const std::string blockedCall = json{
@@ -2731,6 +2752,7 @@ void TestAddAgentToWorkspaceTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "workspace-chat-1";
@@ -2760,7 +2782,7 @@ void TestAddAgentToWorkspaceTool() {
 
     ActivityLog activityLog(L"test-add-agent-to-workspace", "test-add-agent-to-workspace");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "tyrell", "workspace-chat-1");
 
     const std::string call = json{
@@ -2827,6 +2849,7 @@ void TestRequestTemporaryPermissionTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2843,7 +2866,7 @@ void TestRequestTemporaryPermissionTool() {
 
     ActivityLog activityLog(L"test-request-temp-permission", "test-request-temp-permission");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string call = json{
@@ -2918,6 +2941,7 @@ void TestRequestNewToolTool() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -2934,7 +2958,7 @@ void TestRequestNewToolTool() {
 
     ActivityLog activityLog(L"test-request-new-tool", "test-request-new-tool");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string call = json{
@@ -2998,6 +3022,7 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -3013,7 +3038,7 @@ void TestAlwaysAllowedToolsAndTempGrantFallback() {
 
     ActivityLog activityLog(L"test-always-allowed-and-temp-grant", "test-always-allowed-and-temp-grant");
     McpServer server(
-        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore,
+        chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore, taskStore, reminderStore, subagentTemplateStore,
         activityLog, "tyrell", "chat-1");
 
     const std::string rememberCall = json{
@@ -3261,6 +3286,7 @@ void TestTaskToolsRoundTripAndValidation() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -3274,7 +3300,7 @@ void TestTaskToolsRoundTripAndValidation() {
     ActivityLog activityLog(L"test-task-tools", "test-task-tools");
     McpServer server(
         chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
-        taskStore, reminderStore, activityLog, "alex", "chat-1");
+        taskStore, reminderStore, subagentTemplateStore, activityLog, "alex", "chat-1");
 
     int nextId = 1;
     auto call = [&](const std::string& name, const json& arguments) -> json {
@@ -3344,6 +3370,7 @@ void TestScheduleReminderToolValidation() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat chat;
     chat.id = "chat-1";
@@ -3358,7 +3385,7 @@ void TestScheduleReminderToolValidation() {
     ActivityLog activityLog(L"test-schedule-reminder", "test-schedule-reminder");
     McpServer server(
         chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
-        taskStore, reminderStore, activityLog, "alex", "chat-1");
+        taskStore, reminderStore, subagentTemplateStore, activityLog, "alex", "chat-1");
 
     int nextId = 1;
     auto call = [&](const std::string& name, const json& arguments) -> json {
@@ -3442,6 +3469,7 @@ void TestScheduleReminderChatParticipationEnforcement() {
     TempPermissionStore tempPermissionStore(db);
     TaskStore taskStore(db);
     ReminderStore reminderStore(db);
+    SubagentTemplateStore subagentTemplateStore(db);
 
     Chat ownChat;
     ownChat.id = "dm-alex";
@@ -3464,7 +3492,7 @@ void TestScheduleReminderChatParticipationEnforcement() {
     ActivityLog activityLog(L"test-schedule-reminder-participation", "test-schedule-reminder-participation");
     McpServer server(
         chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore, tempPermissionStore,
-        taskStore, reminderStore, activityLog, "alex", "dm-alex");
+        taskStore, reminderStore, subagentTemplateStore, activityLog, "alex", "dm-alex");
 
     const json deniedResponse = json::parse(server.HandleLine(json{
         {"jsonrpc", "2.0"},
@@ -3492,6 +3520,333 @@ void TestScheduleReminderChatParticipationEnforcement() {
     Check(
         allowedResponse["result"]["isError"] == false,
         "schedule_reminder still succeeds for a chat the caller actually participates in");
+}
+
+void TestSubagentTemplateStore() {
+    Database db;
+    db.Open(L":memory:");
+    Schema::EnsureCreated(db);
+    SubagentTemplateStore store(db);
+
+    SubagentTemplate missing;
+    Check(!store.Get("no-such-template", missing), "SubagentTemplateStore::Get fails for an unknown id");
+
+    SubagentTemplate tmpl;
+    tmpl.id = "flutter-test-run";
+    tmpl.name = "Flutter test run";
+    tmpl.description = "Run flutter analyze/test and report results.";
+    tmpl.taskTemplate = "Run flutter analyze and flutter test in {{repo}}, report pass/fail counts.";
+    tmpl.toolPermissionsJson = R"(["read_chat"])";
+    tmpl.scope = "lib/**";
+    tmpl.requiresReview = false;
+    tmpl.createdBy = "dax";
+    tmpl.createdAt = 1;
+    tmpl.updatedAt = 1;
+    Check(store.Upsert(tmpl), "SubagentTemplateStore::Upsert succeeds");
+
+    SubagentTemplate loaded;
+    Check(store.Get("flutter-test-run", loaded), "SubagentTemplateStore::Get finds the upserted row");
+    Check(
+        loaded.name == "Flutter test run" && loaded.taskTemplate == tmpl.taskTemplate && loaded.scope == "lib/**" &&
+            !loaded.requiresReview,
+        "SubagentTemplateStore::Get round-trips every field");
+
+    tmpl.description = "Updated description.";
+    tmpl.requiresReview = true;
+    tmpl.updatedAt = 2;
+    Check(store.Upsert(tmpl), "SubagentTemplateStore::Upsert (again) updates in place");
+
+    SubagentTemplate reloaded;
+    store.Get("flutter-test-run", reloaded);
+    Check(
+        reloaded.description == "Updated description." && reloaded.requiresReview,
+        "SubagentTemplateStore::Upsert on an existing id overwrites rather than duplicating");
+
+    const std::vector<SubagentTemplate> all = store.ListAll();
+    Check(all.size() == 1, "SubagentTemplateStore::ListAll returns exactly one row after two upserts of the same id");
+}
+
+// Shared scaffolding for the spawn_subagent/report_subagent_result tests
+// below — every one of them needs the full store set plus a chat the
+// "parent" agent participates in.
+struct SubagentTestFixture {
+    Database db;
+    ChatStore chatStore{db};
+    AgentStore agentStore{db};
+    ApprovalStore approvalStore{db};
+    PromptTemplateStore promptTemplateStore{db};
+    RepoStore repoStore{db};
+    WorkspaceStore workspaceStore{db};
+    TempPermissionStore tempPermissionStore{db};
+    TaskStore taskStore{db};
+    ReminderStore reminderStore{db};
+    SubagentTemplateStore subagentTemplateStore{db};
+    ActivityLog activityLog{L"test-subagents", "test-subagents"};
+
+    SubagentTestFixture() {
+        db.Open(L":memory:");
+        Schema::EnsureCreated(db);
+
+        Chat chat;
+        chat.id = "chat-1";
+        chat.createdBy = "user";
+        chat.status = "active";
+        chat.createdAt = 1;
+        chatStore.CreateChat(chat);
+        chatStore.AddParticipant("chat-1", "agent", "alex");
+
+        SeedTestAgent(
+            agentStore, "alex",
+            {"spawn_subagent", "get_subagent_status", "get_subagent_result", "message_subagent", "cancel_subagent",
+             "list_my_subagents", "create_subagent_template", "list_subagent_templates"});
+    }
+
+    // A fresh McpServer scoped to `agentId`/`chatId` — spawn_subagent
+    // deliberately doesn't hold a live server across calls (mirrors the
+    // real system, where every tool call is its own MCP subprocess).
+    McpServer Server(const std::string& agentId, const std::string& chatId) {
+        return McpServer(
+            chatStore, agentStore, approvalStore, promptTemplateStore, repoStore, workspaceStore,
+            tempPermissionStore, taskStore, reminderStore, subagentTemplateStore, activityLog, agentId, chatId);
+    }
+};
+
+json CallTool(McpServer& server, int& nextId, const std::string& name, const json& arguments) {
+    const std::string line = json{
+        {"jsonrpc", "2.0"},
+        {"id", nextId++},
+        {"method", "tools/call"},
+        {"params", {{"name", name}, {"arguments", arguments}}},
+    }.dump();
+    return json::parse(server.HandleLine(line));
+}
+
+json ToolResult(const json& response) {
+    return json::parse(response["result"]["content"][0]["text"].get<std::string>());
+}
+
+void TestSpawnSubagentTool() {
+    SubagentTestFixture fx;
+    McpServer parentServer = fx.Server("alex", "chat-1");
+    int nextId = 1;
+
+    const json spawnResponse = CallTool(
+        parentServer, nextId, "spawn_subagent",
+        {{"task", "Run the test suite and report pass/fail counts."}, {"context", "Focus on the db package."}});
+    Check(spawnResponse["result"]["isError"] == false, "spawn_subagent succeeds for a permitted caller");
+    const json spawned = ToolResult(spawnResponse);
+    Check(spawned["status"] == "in_progress", "spawn_subagent returns status in_progress");
+    const std::string subagentId = spawned["subagent_id"].get<std::string>();
+
+    Agent subagentAgent;
+    Check(fx.agentStore.Get(subagentId, subagentAgent), "spawn_subagent created a real Agent row");
+    Check(subagentAgent.status == "active", "a freshly spawned subagent starts active");
+    Check(subagentAgent.toolPermissionsJson == "[]", "tool_permissions defaults to an empty allow-list, not inherited");
+    Check(
+        subagentAgent.systemPrompt.find("Run the test suite") == std::string::npos,
+        "the task itself is not baked into the system prompt (it lives in the seed message instead)");
+    Check(
+        subagentAgent.systemPrompt.find("orchestrator subagent") != std::string::npos,
+        "the system prompt still identifies the agent as a subagent");
+
+    std::string requiresReviewFact;
+    Check(
+        fx.agentStore.GetFact(subagentId, "requires_review", requiresReviewFact) && requiresReviewFact == "false",
+        "requires_review defaults to false when not requested");
+
+    Task task;
+    Check(fx.taskStore.Get(subagentId, task), "spawn_subagent created a tracking task keyed by the subagent id");
+    Check(
+        task.status == "in_progress" && task.assigneeAgentId == subagentId && task.createdBy == "alex" &&
+            task.chatId == "chat-1",
+        "the task is in_progress, self-assigned, created by the parent, and points back at the origin chat");
+
+    const std::string subagentChatId = "subagent-" + subagentId;
+    Chat subagentChat;
+    Check(fx.chatStore.GetChat(subagentChatId, subagentChat), "spawn_subagent created the subagent's own chat");
+    Check(subagentChat.discordChannelId.empty(), "the subagent's chat is never given a Discord channel");
+    Check(
+        fx.chatStore.IsParticipant(subagentChatId, "agent", subagentId),
+        "the subagent is a participant of its own chat");
+
+    const std::vector<Message> seedMessages = fx.chatStore.RecentMessages(subagentChatId, 10);
+    Check(seedMessages.size() == 1, "exactly one seed message was inserted into the subagent's chat");
+    Check(
+        seedMessages[0].content.find("Run the test suite") != std::string::npos &&
+            seedMessages[0].content.find("Focus on the db package") != std::string::npos,
+        "the seed message carries both the task text and the extra context");
+    Check(seedMessages[0].senderId == "alex", "the seed message is attributed to the parent");
+}
+
+void TestSpawnSubagentNestingGuard() {
+    SubagentTestFixture fx;
+    // Manually construct exactly the shape spawn_subagent itself would have
+    // produced for a subagent of "alex" — a task whose id equals its own
+    // assignee_agent_id — without going through spawn_subagent, so this test
+    // doesn't depend on that codepath already being correct.
+    SeedTestAgent(fx.agentStore, "sub-1", {"spawn_subagent"});
+    Task subTask;
+    subTask.id = "sub-1";
+    subTask.chatId = "chat-1";
+    subTask.title = "delegated";
+    subTask.status = "in_progress";
+    subTask.assigneeAgentId = "sub-1";
+    subTask.createdBy = "alex";
+    subTask.createdAt = 1;
+    subTask.updatedAt = 1;
+    fx.taskStore.Create(subTask);
+
+    McpServer subagentServer = fx.Server("sub-1", "subagent-sub-1");
+    int nextId = 1;
+    const json response = CallTool(subagentServer, nextId, "spawn_subagent", {{"task", "go deeper"}});
+    Check(response["result"]["isError"] == true, "a subagent cannot spawn its own subagent");
+
+    Check(fx.taskStore.List("", "", "").size() == 1, "the nesting guard rejected the call before creating anything");
+}
+
+void TestReportSubagentResultStatusMappingAndWakeup() {
+    struct Case {
+        bool success;
+        bool spawnRequiresReview;
+        bool selfFlaggedReview;
+        std::string expectedStatus;
+        const char* description;
+    };
+    const std::vector<Case> cases = {
+        {true, false, false, "done", "success with no review flag anywhere -> done"},
+        {true, true, false, "in_review", "success but spawn-time requires_review -> in_review"},
+        {true, false, true, "in_review", "success but self-flagged requires_review -> in_review"},
+        {false, false, false, "blocked", "failure always lands on blocked regardless of review flags"},
+    };
+
+    for (const Case& c : cases) {
+        SubagentTestFixture fx;
+        McpServer parentServer = fx.Server("alex", "chat-1");
+        int parentNextId = 1;
+        const json spawnResponse = CallTool(
+            parentServer, parentNextId, "spawn_subagent",
+            {{"task", "do the thing"}, {"requires_review", c.spawnRequiresReview}});
+        const std::string subagentId = ToolResult(spawnResponse)["subagent_id"].get<std::string>();
+        const std::string subagentChatId = "subagent-" + subagentId;
+
+        McpServer subagentServer = fx.Server(subagentId, subagentChatId);
+        int subNextId = 1;
+        const json reportResponse = CallTool(
+            subagentServer, subNextId, "report_subagent_result",
+            {{"success", c.success},
+             {"summary", "did the thing"},
+             {"pass_count", 5},
+             {"fail_count", c.success ? 0 : 1},
+             {"requires_review", c.selfFlaggedReview}});
+        Check(
+            reportResponse["result"]["isError"] == false,
+            std::string("report_subagent_result succeeds (case: ") + c.description + ")");
+        const json reported = ToolResult(reportResponse);
+        Check(reported["status"] == c.expectedStatus, c.description);
+
+        Task task;
+        fx.taskStore.Get(subagentId, task);
+        Check(task.status == c.expectedStatus, std::string(c.description) + " (persisted task status)");
+
+        Agent subagentAgent;
+        fx.agentStore.Get(subagentId, subagentAgent);
+        Check(subagentAgent.status == "disabled", "a subagent is disabled once it reports its result");
+
+        const std::vector<Message> subChatMessages = fx.chatStore.RecentMessages(subagentChatId, 10);
+        const bool hasStructuredReport = std::any_of(subChatMessages.begin(), subChatMessages.end(), [](const Message& m) {
+            return m.type == "subagent_result" && m.metadataJson.find("\"pass_count\":5") != std::string::npos;
+        });
+        Check(hasStructuredReport, "a type=subagent_result message with structured metadata lands in the subagent's own chat");
+
+        const std::vector<Message> originChatMessages = fx.chatStore.RecentMessages("chat-1", 10);
+        const bool hasWakeup = std::any_of(originChatMessages.begin(), originChatMessages.end(), [&](const Message& m) {
+            return m.content.find(subagentId) != std::string::npos && m.content.find("finished") != std::string::npos;
+        });
+        Check(hasWakeup, "a wake-up message naming the subagent landed in the parent's origin chat");
+    }
+}
+
+void TestReportSubagentResultRejectsNonSubagentCaller() {
+    SubagentTestFixture fx;
+    // "alex" never had spawn_subagent called on it, so it's not the
+    // assignee of any task with a matching id — report_subagent_result must
+    // refuse rather than let an arbitrary agent conclude a task it doesn't
+    // own.
+    McpServer server = fx.Server("alex", "chat-1");
+    int nextId = 1;
+    const json response = CallTool(server, nextId, "report_subagent_result", {{"success", true}, {"summary", "done"}});
+    Check(response["result"]["isError"] == true, "report_subagent_result rejects a caller that isn't a subagent");
+}
+
+void TestSubagentOwnershipEnforcement() {
+    SubagentTestFixture fx;
+    SeedTestAgent(
+        fx.agentStore, "tyrell",
+        {"get_subagent_status", "get_subagent_result", "message_subagent", "cancel_subagent"});
+
+    McpServer parentServer = fx.Server("alex", "chat-1");
+    int parentNextId = 1;
+    const json spawnResponse = CallTool(parentServer, parentNextId, "spawn_subagent", {{"task", "do the thing"}});
+    const std::string subagentId = ToolResult(spawnResponse)["subagent_id"].get<std::string>();
+
+    // "alex" (the real owner) can query/steer it.
+    const json ownerStatus = CallTool(parentServer, parentNextId, "get_subagent_status", {{"subagent_id", subagentId}});
+    Check(ownerStatus["result"]["isError"] == false, "the spawning agent can read its own subagent's status");
+
+    // "tyrell" (a bystander) cannot.
+    McpServer bystanderServer = fx.Server("tyrell", "chat-1");
+    int bystanderNextId = 1;
+    for (const std::string& tool : {"get_subagent_status", "get_subagent_result", "cancel_subagent"}) {
+        const json response = CallTool(bystanderServer, bystanderNextId, tool, {{"subagent_id", subagentId}});
+        Check(response["result"]["isError"] == true, tool + ": a non-owner is rejected");
+    }
+    const json messageResponse =
+        CallTool(bystanderServer, bystanderNextId, "message_subagent", {{"subagent_id", subagentId}, {"text", "hi"}});
+    Check(messageResponse["result"]["isError"] == true, "message_subagent: a non-owner is rejected");
+
+    const json unknownResponse =
+        CallTool(parentServer, parentNextId, "get_subagent_status", {{"subagent_id", "no-such-subagent"}});
+    Check(unknownResponse["result"]["isError"] == true, "get_subagent_status rejects an unknown subagent_id");
+}
+
+void TestCreateSubagentTemplateAndSpawnFromIt() {
+    SubagentTestFixture fx;
+    McpServer server = fx.Server("alex", "chat-1");
+    int nextId = 1;
+
+    const json createResponse = CallTool(
+        server, nextId, "create_subagent_template",
+        {{"name", "Repo test run"},
+         {"description", "Run the test suite in a given repo."},
+         {"task_template", "Run the full test suite in {{repo}} and report the results."},
+         {"tool_permissions", json::array({"read_chat"})},
+         {"requires_review", true}});
+    Check(createResponse["result"]["isError"] == false, "create_subagent_template succeeds");
+    const std::string templateId = ToolResult(createResponse)["template_id"].get<std::string>();
+
+    const json listResponse = CallTool(server, nextId, "list_subagent_templates", json::object());
+    const json listed = ToolResult(listResponse)["templates"];
+    Check(listed.is_array() && listed.size() == 1 && listed[0]["id"] == templateId, "list_subagent_templates returns the saved template");
+
+    const json spawnResponse = CallTool(
+        server, nextId, "spawn_subagent",
+        {{"template_id", templateId}, {"variables", {{"repo", "RoutinesApp"}}}});
+    Check(spawnResponse["result"]["isError"] == false, "spawn_subagent(template_id=...) succeeds");
+    const std::string subagentId = ToolResult(spawnResponse)["subagent_id"].get<std::string>();
+
+    Task task;
+    fx.taskStore.Get(subagentId, task);
+    Check(
+        task.description.find("RoutinesApp") != std::string::npos && task.description.find("{{repo}}") == std::string::npos,
+        "the template's {{repo}} placeholder was substituted with the caller's variable");
+
+    Agent subagentAgent;
+    fx.agentStore.Get(subagentId, subagentAgent);
+    Check(subagentAgent.toolPermissionsJson == R"(["read_chat"])", "the template's tool_permissions default was applied");
+
+    std::string requiresReviewFact;
+    fx.agentStore.GetFact(subagentId, "requires_review", requiresReviewFact);
+    Check(requiresReviewFact == "true", "the template's requires_review default was applied");
 }
 
 } // namespace
@@ -3551,6 +3906,13 @@ int main() {
     RUN(TestTaskToolsRoundTripAndValidation);
     RUN(TestScheduleReminderToolValidation);
     RUN(TestScheduleReminderChatParticipationEnforcement);
+    RUN(TestSubagentTemplateStore);
+    RUN(TestSpawnSubagentTool);
+    RUN(TestSpawnSubagentNestingGuard);
+    RUN(TestReportSubagentResultStatusMappingAndWakeup);
+    RUN(TestReportSubagentResultRejectsNonSubagentCaller);
+    RUN(TestSubagentOwnershipEnforcement);
+    RUN(TestCreateSubagentTemplateAndSpawnFromIt);
 #undef RUN
 
     if (failures > 0) {
