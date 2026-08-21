@@ -229,6 +229,14 @@ bool Schema::EnsureCreated(Database& db) {
     if (!EnsureColumn(db, "chat_participants", "mode", "TEXT NOT NULL DEFAULT 'auto_respond'")) {
         return false;
     }
+    // Per-chat override for Orchestrator's turn-limit guard (see
+    // kMaxAgentChainTurns) — NULL means "no override, use the global
+    // default", 0 means "no limit at all, never pause for input", any
+    // positive N overrides the default. Set via the /turn-limit slash
+    // command (ChatStore::SetTurnLimit/GetTurnLimit).
+    if (!EnsureColumn(db, "chats", "turn_limit", "INTEGER")) {
+        return false;
+    }
     // One-shot claim flag for repo onboarding (see Orchestrator::
     // EnsurePendingRepoOnboarding) — a repo imported via the import_repo/
     // create_repo MCP tools lands at status='ready' with no way for that

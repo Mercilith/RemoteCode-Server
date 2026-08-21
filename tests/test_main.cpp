@@ -504,6 +504,22 @@ void TestChatStore() {
         store.GetWebhook("chat-1", "alex", webhookId, webhookToken) && webhookId == "wh-id" &&
             webhookToken == "wh-token",
         "ChatStore: GetWebhook round-trips");
+
+    int turnLimit = -1;
+    Check(
+        !store.GetTurnLimit("chat-1", turnLimit),
+        "ChatStore: GetTurnLimit returns false when no override has been set");
+    Check(store.SetTurnLimit("chat-1", 0), "ChatStore: SetTurnLimit(0) succeeds");
+    Check(
+        store.GetTurnLimit("chat-1", turnLimit) && turnLimit == 0,
+        "ChatStore: GetTurnLimit round-trips a 0 (no-limit) override");
+    Check(store.SetTurnLimit("chat-1", 20), "ChatStore: SetTurnLimit(20) succeeds");
+    Check(
+        store.GetTurnLimit("chat-1", turnLimit) && turnLimit == 20,
+        "ChatStore: GetTurnLimit round-trips a positive override, replacing the previous one");
+    Check(
+        !store.GetTurnLimit("chat-2", turnLimit),
+        "ChatStore: a different chat with no override set still returns false");
 }
 
 void TestMcpServer() {

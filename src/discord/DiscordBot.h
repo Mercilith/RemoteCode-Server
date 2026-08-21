@@ -79,6 +79,14 @@ using SlashCommandCloseChatHandler = std::function<void(const std::string& chann
 using SlashCommandCreateWorkspaceHandler =
     std::function<std::string(const std::string& reposRaw, const std::string& title)>;
 
+// /turn-limit — `channelId` is the invoking channel (resolved to a chat the
+// same way add-agent/remove-agent do), `turnLimit` the required "limit"
+// integer option (0 = no limit at all for this chat; any positive N
+// overrides the global default). Runs synchronously and replies with the
+// real result, same class of work as add-agent/remove-agent (a single DB
+// write, no agent turn, no slow REST call).
+using SlashCommandTurnLimitHandler = std::function<std::string(const std::string& channelId, int turnLimit)>;
+
 // Thin DPP wrapper: gateway connect, message handler (writes into
 // ChatStore), and a webhook-based post helper so each agent can appear
 // under its own name/avatar in a channel.
@@ -115,6 +123,10 @@ public:
     void SetSlashCommandRemoveAgentHandler(SlashCommandRemoveAgentHandler handler);
     void SetSlashCommandCloseChatHandler(SlashCommandCloseChatHandler handler);
     void SetSlashCommandCreateWorkspaceHandler(SlashCommandCreateWorkspaceHandler handler);
+    // Registers /turn-limit as a global slash command on connect and
+    // dispatches invocations to the handler below. Same optional/no-op-if-
+    // unset pattern as the others.
+    void SetSlashCommandTurnLimitHandler(SlashCommandTurnLimitHandler handler);
 
     // Connects to the Gateway and blocks until Stop() is called. Intended
     // to be run on its own thread by Orchestrator.
@@ -133,6 +145,13 @@ public:
     // system-level messages (e.g. approval outcomes) that no single agent
     // "said."
     void PostPlain(const std::string& channelId, const std::string& content);
+
+    // Same as PostPlain, but waits for the REST call and returns the
+    // posted message's Discord id (empty on failure or if content chunked
+    // into more than one message, in which case this is the first chunk's
+    // id) — needed when the caller has to seed a reaction onto the message
+    // afterward, e.g. the turn-limit-reached notice's continue checkmark.
+    std::string PostPlainWithId(const std::string& channelId, const std::string& content);
 
     // Adds `emoji` (a literal unicode reaction, e.g. a check/cross) to a
     // message. Used to seed the approve/reject options on approval-request
@@ -240,6 +259,7 @@ private:
     SlashCommandRemoveAgentHandler onSlashCommandRemoveAgent_;
     SlashCommandCloseChatHandler onSlashCommandCloseChat_;
     SlashCommandCreateWorkspaceHandler onSlashCommandCreateWorkspace_;
+    SlashCommandTurnLimitHandler onSlashCommandTurnLimit_;
     // Guards bot_ against a race between Run() reassigning it (fresh
     // cluster per (re)connect) and IsZombied() reading it from the
     // watchdog's own timer thread. Other members' cross-thread use of bot_

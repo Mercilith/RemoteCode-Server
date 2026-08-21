@@ -104,6 +104,13 @@ public:
     std::string HandleSlashCommandAddAgent(const std::string& channelId, const std::string& agentRaw);
     // Drops the chat_participants row only — chat history is untouched.
     std::string HandleSlashCommandRemoveAgent(const std::string& channelId, const std::string& agentRaw);
+    // Sets the chat backing `channelId`'s turn-limit override (see
+    // ChatStore::SetTurnLimit) — 0 disables the limit entirely for this
+    // chat, any positive value overrides the global default
+    // (kMaxAgentChainTurns). `turnLimit` < 0 is rejected (Discord's own
+    // option validation already enforces this, but the handler doesn't
+    // trust that alone).
+    std::string HandleSlashCommandTurnLimit(const std::string& channelId, int turnLimit);
     // Archives the chat backing `channelId` and deletes the channel itself.
     // Fire-and-forget: the interaction's ack already happened in
     // DiscordBot::HandleSlashCommand before this runs (see
@@ -213,8 +220,16 @@ private:
         const std::string& chatId, const std::string& content, std::vector<std::string>& participantIds,
         std::vector<Agent>& participants, std::unordered_map<std::string, std::string>& participantModes);
     // Trailing agent-authored messages in `chatId` since the last
-    // user-authored one — the turn-limit guard's counter.
+    // user-authored one, or since the last turn_limit_reset marker (see
+    // HandleTurnLimitContinue) — the turn-limit guard's counter.
     int CountTrailingAgentTurns(const std::string& chatId);
+    // Runs when Cardon reacts with the checkmark on a turn_limit_notice
+    // message (see HandleReaction) — inserts a turn_limit_reset marker
+    // (which CountTrailingAgentTurns treats the same as a fresh
+    // user-authored message, i.e. it resets the trailing count to 0) and
+    // re-dispatches the chat, so auto-respond participants pick back up
+    // immediately without Cardon having to type anything.
+    void HandleTurnLimitContinue(const std::string& chatId);
     // Posts any newly-created approval drafts (from submit_agent_for_approval)
     // to Discord with the approve/reject reactions seeded on them.
     void PostPendingApprovals();

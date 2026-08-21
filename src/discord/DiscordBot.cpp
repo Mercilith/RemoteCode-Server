@@ -52,6 +52,10 @@ void DiscordBot::SetSlashCommandCreateWorkspaceHandler(SlashCommandCreateWorkspa
     onSlashCommandCreateWorkspace_ = std::move(handler);
 }
 
+void DiscordBot::SetSlashCommandTurnLimitHandler(SlashCommandTurnLimitHandler handler) {
+    onSlashCommandTurnLimit_ = std::move(handler);
+}
+
 void DiscordBot::Run() {
     everReadyThisRun_ = false;
     runStartedAt_ = time(nullptr);
@@ -140,6 +144,16 @@ void DiscordBot::Run() {
             createWorkspaceCommand.add_option(
                 dpp::command_option(dpp::co_string, "title", "Optional workspace title", false));
             commands.push_back(createWorkspaceCommand);
+        }
+        if (onSlashCommandTurnLimit_) {
+            dpp::slashcommand turnLimitCommand(
+                "turn-limit",
+                "Set this chat's turn limit (consecutive agent turns before pausing for your input).",
+                bot_->me.id);
+            turnLimitCommand.add_option(
+                dpp::command_option(dpp::co_integer, "limit", "0 for no limit, or a positive number", true)
+                    .set_min_value(static_cast<int64_t>(0)));
+            commands.push_back(turnLimitCommand);
         }
 
         if (!commands.empty()) {
@@ -248,6 +262,15 @@ std::string GetStringParam(const dpp::slashcommand_t& event, const std::string& 
     }
     return "";
 }
+
+// A co_integer option's value comes back as int64_t inside the variant.
+int GetIntParam(const dpp::slashcommand_t& event, const std::string& name, int defaultValue) {
+    const dpp::command_value param = event.get_parameter(name);
+    if (const int64_t* value = std::get_if<int64_t>(&param)) {
+        return static_cast<int>(*value);
+    }
+    return defaultValue;
+}
 } // namespace
 
 void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
@@ -311,6 +334,13 @@ void DiscordBot::HandleSlashCommand(const dpp::slashcommand_t& event) {
         // subprocess call, not a network round-trip, so this stays well
         // inside Discord's 3-second ack window in practice.
         event.reply(onSlashCommandCreateWorkspace_(repos, title));
+        return;
+    }
+
+    if (name == "turn-limit" && onSlashCommandTurnLimit_) {
+        const std::string channelId = std::to_string(event.command.channel_id);
+        const int turnLimit = GetIntParam(event, "limit", -1);
+        event.reply(onSlashCommandTurnLimit_(channelId, turnLimit));
         return;
     }
 
@@ -408,6 +438,35 @@ void DiscordBot::PostPlain(const std::string& channelId, const std::string& cont
     for (const std::string& chunk : ChunkForDiscord(content)) {
         bot_->message_create(dpp::message(std::stoull(channelId), chunk));
     }
+}
+
+std::string DiscordBot::PostPlainWithId(const std::string& channelId, const std::string& content) {
+    if (!bot_) {
+        return "";
+    }
+    std::string firstMessageId;
+    for (const std::string& chunk : ChunkForDiscord(content)) {
+        std::promise<dpp::confirmation_callback_t> promise;
+        std::future<dpp::confirmation_callback_t> future = promise.get_future();
+        // wait=true (the default when a callback is given) so the callback
+        // carries the posted dpp::message with its real id — same pattern
+        // as PostAsAgent's execute_webhook call above.
+        bot_->message_create(
+            dpp::message(std::stoull(channelId), chunk),
+            [&promise](const dpp::confirmation_callback_t& result) { promise.set_value(result); });
+        const dpp::confirmation_callback_t result = future.get();
+        if (result.is_error()) {
+            if (onLog_) {
+                onLog_("message_create failed for channel '" + channelId + "': " + result.get_error().message);
+            }
+            continue; // best-effort — a later chunk failing shouldn't lose earlier ones
+        }
+        const dpp::message posted = std::get<dpp::message>(result.value);
+        if (firstMessageId.empty()) {
+            firstMessageId = std::to_string(posted.id);
+        }
+    }
+    return firstMessageId;
 }
 
 bool DiscordBot::AddReaction(

@@ -496,6 +496,30 @@ bool ChatStore::ClearPendingAgentGrant(const std::string& chatId, const std::str
     return stmt.Ok();
 }
 
+bool ChatStore::SetTurnLimit(const std::string& chatId, int turnLimit) {
+    Statement stmt(db_, "UPDATE chats SET turn_limit = ?1 WHERE id = ?2;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindInt64(1, turnLimit);
+    stmt.BindText(2, chatId);
+    stmt.Step();
+    return stmt.Ok();
+}
+
+bool ChatStore::GetTurnLimit(const std::string& chatId, int& outTurnLimit) {
+    Statement stmt(db_, "SELECT turn_limit FROM chats WHERE id = ?1;");
+    if (!stmt.Valid()) {
+        return false;
+    }
+    stmt.BindText(1, chatId);
+    if (!stmt.Step() || stmt.ColumnIsNull(0)) {
+        return false;
+    }
+    outTurnLimit = static_cast<int>(stmt.ColumnInt64(0));
+    return true;
+}
+
 bool ChatStore::GetWebhook(
     const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
     std::string& outWebhookToken) {

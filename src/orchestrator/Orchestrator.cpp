@@ -361,6 +361,10 @@ void Orchestrator::Run(HANDLE shutdownEvent, LogFn log) {
         [this](const std::string& reposRaw, const std::string& title) {
             return HandleSlashCommandCreateWorkspace(reposRaw, title);
         });
+    discordBot_->SetSlashCommandTurnLimitHandler(
+        [this](const std::string& channelId, int turnLimit) {
+            return HandleSlashCommandTurnLimit(channelId, turnLimit);
+        });
 
     // discordBot_->Stop() is the one mechanism used both for a real
     // shutdown and for a watchdog-triggered reconnect — `stopping` is what
@@ -791,23 +795,42 @@ void Orchestrator::HandleIncomingMessage(const std::string& chatId) {
             continue;
         }
 
-        if (CountTrailingAgentTurns(chatId) >= kMaxAgentChainTurns) {
+        // A chat's own turn_limit override (see ChatStore::SetTurnLimit / the
+        // /turn-limit slash command) beats the global default when set — 0
+        // means "no limit at all," skipping this guard entirely.
+        int effectiveTurnLimit = kMaxAgentChainTurns;
+        int turnLimitOverride = 0;
+        if (chatStore_->GetTurnLimit(chatId, turnLimitOverride)) {
+            effectiveTurnLimit = turnLimitOverride;
+        }
+
+        if (effectiveTurnLimit != 0 && CountTrailingAgentTurns(chatId) >= effectiveTurnLimit) {
             log_(L"Orchestrator: turn limit reached in chat '" + AsciiToWide(chatId) + L"' — pausing "
                  L"auto-dispatch until you say something.");
             activityLog_->Log(chatId, agentId, "turn_limit_reached");
 
-            const std::string notice = "Turn limit reached (" + std::to_string(kMaxAgentChainTurns) +
-                " agent turns in a row) — waiting for your input.";
+            const std::string notice = "Turn limit reached (" + std::to_string(effectiveTurnLimit) +
+                " agent turns in a row) — react \xE2\x9C\x85 to continue without saying anything, or just "
+                "say something.";
             Message noticeMessage;
             noticeMessage.chatId = chatId;
             noticeMessage.senderType = "system";
             noticeMessage.senderId = "system";
-            noticeMessage.type = "system_event";
+            // Its own type (distinct from a generic "system_event") is what
+            // lets HandleReaction recognize the checkmark on THIS message as
+            // "continue dispatch" rather than an ordinary approval.
+            noticeMessage.type = "turn_limit_notice";
             noticeMessage.content = notice;
             noticeMessage.createdAt = static_cast<int64_t>(time(nullptr));
-            chatStore_->InsertMessage(noticeMessage);
+            const int64_t noticeMessageId = chatStore_->InsertMessage(noticeMessage);
             if (!chat.discordChannelId.empty()) {
-                discordBot_->PostPlain(chat.discordChannelId, notice);
+                const std::string discordMessageId = discordBot_->PostPlainWithId(chat.discordChannelId, notice);
+                if (!discordMessageId.empty()) {
+                    if (noticeMessageId >= 0) {
+                        chatStore_->SetMessageDiscordId(noticeMessageId, discordMessageId);
+                    }
+                    discordBot_->AddReaction(chat.discordChannelId, discordMessageId, kApproveEmoji);
+                }
             }
             break;
         }
@@ -1082,7 +1105,11 @@ int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {
     const std::vector<Message> recent = chatStore_->RecentMessages(chatId, 50);
     int count = 0;
     for (auto it = recent.rbegin(); it != recent.rend(); ++it) {
-        if (it->senderType == "user") {
+        // "turn_limit_reset" (see HandleTurnLimitContinue) resets the count
+        // the same way a real user message does — it's how the checkmark
+        // reaction on a turn-limit notice lets dispatch continue without
+        // Cardon actually having to type anything.
+        if (it->senderType == "user" || it->type == "turn_limit_reset") {
             break;
         }
         if (it->senderType == "agent") {
@@ -1090,6 +1117,20 @@ int Orchestrator::CountTrailingAgentTurns(const std::string& chatId) {
         }
     }
     return count;
+}
+
+void Orchestrator::HandleTurnLimitContinue(const std::string& chatId) {
+    Message reset;
+    reset.chatId = chatId;
+    reset.senderType = "system";
+    reset.senderId = "system";
+    reset.type = "turn_limit_reset";
+    reset.content = "Continuing — turn limit acknowledged.";
+    reset.createdAt = static_cast<int64_t>(time(nullptr));
+    if (chatStore_->InsertMessage(reset) < 0) {
+        return;
+    }
+    HandleIncomingMessage(chatId);
 }
 
 std::string Orchestrator::EnsureChannelForChat(const Chat& chat) {
@@ -1185,6 +1226,17 @@ void Orchestrator::HandleReaction(const std::string& discordMessageId, const std
 
     Message message;
     if (!chatStore_->GetMessageByDiscordId(discordMessageId, message)) {
+        return;
+    }
+
+    // Not an Approval-backed message at all — the turn-limit-reached notice
+    // (see HandleIncomingMessage) carries its own checkmark reaction so
+    // Cardon can wave dispatch through again without saying anything. No
+    // reject action for this one; a cross reaction just does nothing.
+    if (message.type == "turn_limit_notice") {
+        if (isApprove) {
+            HandleTurnLimitContinue(message.chatId);
+        }
         return;
     }
 
@@ -1653,6 +1705,21 @@ std::string Orchestrator::HandleSlashCommandRemoveAgent(const std::string& chann
 
     chatStore_->RemoveParticipant(chat.id, "agent", agent.id);
     return "Removed '" + agent.name + "' from this chat (history preserved).";
+}
+
+std::string Orchestrator::HandleSlashCommandTurnLimit(const std::string& channelId, int turnLimit) {
+    Chat chat;
+    if (!chatStore_->GetChatByDiscordChannel(channelId, chat)) {
+        return "This channel isn't a RemoteCode chat.";
+    }
+    if (turnLimit < 0) {
+        return "Turn limit can't be negative — use 0 for no limit.";
+    }
+    if (!chatStore_->SetTurnLimit(chat.id, turnLimit)) {
+        return "Failed to set the turn limit (internal error).";
+    }
+    return turnLimit == 0 ? "Turn limit disabled for this chat — agents won't pause for your input on their own."
+                           : "Turn limit for this chat set to " + std::to_string(turnLimit) + ".";
 }
 
 void Orchestrator::HandleSlashCommandCloseChat(const std::string& channelId) {

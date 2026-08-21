@@ -148,6 +148,16 @@ public:
     std::vector<PendingAgentGrant> ListPendingAgentGrants();
     bool ClearPendingAgentGrant(const std::string& chatId, const std::string& agentId);
 
+    // Per-chat override for Orchestrator's turn-limit guard — see
+    // Schema.cpp's chats.turn_limit column comment. 0 means "no limit,
+    // never pause for input"; any positive value overrides the global
+    // default (kMaxAgentChainTurns).
+    bool SetTurnLimit(const std::string& chatId, int turnLimit);
+    // Returns true and sets outTurnLimit if this chat has an override set;
+    // false (outTurnLimit untouched) if it has none, meaning the caller
+    // should fall back to the global default.
+    bool GetTurnLimit(const std::string& chatId, int& outTurnLimit);
+
     bool GetWebhook(
         const std::string& chatId, const std::string& agentId, std::string& outWebhookId,
         std::string& outWebhookToken);
